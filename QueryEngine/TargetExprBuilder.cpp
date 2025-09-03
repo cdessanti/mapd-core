@@ -35,6 +35,8 @@
 #define LL_FP(v) executor->cgen_state_->llFp(v)
 #define ROW_FUNC executor->cgen_state_->row_func_
 
+extern bool g_enable_smem_opt_sum;
+
 namespace {
 
 inline bool is_varlen_projection(const Analyzer::Expr* target_expr,
@@ -303,6 +305,7 @@ void TargetExprCodegen::codegen(
                    executor,
                    query_mem_desc,
                    co,
+                   gpu_smem_context,
                    target_lvs,
                    agg_out_ptr_w_idx,
                    agg_out_vec,
@@ -317,6 +320,7 @@ void TargetExprCodegen::codegenAggregate(
     Executor* executor,
     const QueryMemoryDescriptor& query_mem_desc,
     const CompilationOptions& co,
+    const GpuSharedMemoryContext& gpu_smem_context,
     const std::vector<llvm::Value*>& target_lvs,
     const std::tuple<llvm::Value*, llvm::Value*>& agg_out_ptr_w_idx,
     const std::vector<llvm::Value*>& agg_out_vec,
@@ -580,6 +584,13 @@ void TargetExprCodegen::codegenAggregate(
         if (co.device_type == ExecutorDeviceType::GPU &&
             query_mem_desc.threadsShareMemory()) {
           agg_fname += "_shared";
+        }
+        // for SUMs and SUM in AVGs using shared memory.
+        if ((target_info.agg_kind == kSUM ||
+             (target_info.agg_kind == kAVG && !is_count_in_avg)) &&
+            gpu_smem_context.isSharedMemoryUsed() &&
+            agg_chosen_bytes == sizeof(int64_t) && !is_fp_arg && g_enable_smem_opt_sum) {
+          agg_fname += "_smem";
         }
         auto agg_fname_call_ret_lv = group_by_and_agg->emitCall(agg_fname, agg_args);
 

@@ -59,6 +59,7 @@ struct TargetExprCodegen {
                         Executor* executor,
                         const QueryMemoryDescriptor& query_mem_desc,
                         const CompilationOptions& co,
+                        const GpuSharedMemoryContext& gpu_smem_context,
                         const std::vector<llvm::Value*>& target_lvs,
                         const std::tuple<llvm::Value*, llvm::Value*>& agg_out_ptr_w_idx,
                         const std::vector<llvm::Value*>& agg_out_vec,

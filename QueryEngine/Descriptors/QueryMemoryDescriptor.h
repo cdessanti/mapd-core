@@ -154,10 +154,6 @@ class QueryMemoryDescriptor {
     return max_val - min_val > threshold * std::max(bucket, int64_t(1));
   }
 
-  bool isGpuSharedMemoryUsed() const { return gpu_shared_mem_used_; }
-
-  void enableGpuSharedMemory() { gpu_shared_mem_used_ = true; }
-
   static bool countDescriptorsLogicallyEmpty(
       const CountDistinctDescriptors& count_distinct_descriptors) {
     return std::all_of(count_distinct_descriptors.begin(),
@@ -190,6 +186,12 @@ class QueryMemoryDescriptor {
 
   bool hasInterleavedBinsOnGpu() const { return interleaved_bins_on_gpu_; }
   void setHasInterleavedBinsOnGpu(const bool val) { interleaved_bins_on_gpu_ = val; }
+
+  bool isGpuSharedMemoryUsed() const { return gpu_shared_memory_used_; }
+  void setSharedMemoryUsed(const bool val) { gpu_shared_memory_used_ = val; }
+
+  bool hasReductionOnGpu() const { return reduction_on_gpu_; }
+  void setReductionOnGpu(const bool val) { reduction_on_gpu_ = val; }
 
   int32_t getTargetIdxForKey() const { return idx_target_as_key_; }
   void setTargetIdxForKey(const int32_t val) { idx_target_as_key_ = val; }
@@ -428,7 +430,8 @@ class QueryMemoryDescriptor {
   bool use_streaming_top_n_;
   bool threads_can_reuse_group_by_buffers_;
   bool force_4byte_float_;
-  bool gpu_shared_mem_used_;
+  bool reduction_on_gpu_;
+  bool gpu_shared_memory_used_;
 
   ColSlotContext col_slot_context_;
 

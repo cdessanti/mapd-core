@@ -84,6 +84,8 @@ static_assert(false, "LLVM Version >= 14 is required.");
 using heavyai::ErrorCode;
 
 float g_fraction_code_cache_to_evict = 0.2;
+bool g_enable_smem_weigth{false};
+bool g_enable_smem_opt_sum{false};
 
 #ifdef ENABLE_GEOS
 
@@ -771,6 +773,7 @@ declare i32 @pos_step_impl();
 declare i8 @thread_warp_idx(i8);
 declare i64* @init_shared_mem(i64*, i32);
 declare i64* @init_shared_mem_nop(i64*, i32);
+declare void @copy_out_buf_smem_to_gmem(i64*, i64* , i32);
 declare i64* @declare_dynamic_shared_memory();
 declare void @write_back_nop(i64*, i64*, i32);
 declare void @write_back_non_grouped_agg(i64*, i64*, i32);
@@ -804,6 +807,8 @@ declare i32 @agg_count_if_int32_shared(i32*, i32);
 declare i32 @agg_count_if_int32_skip_val_shared(i32*, i32, i32);
 declare i64 @agg_sum_shared(i64*, i64);
 declare i64 @agg_sum_skip_val_shared(i64*, i64, i64);
+declare i64 @agg_sum_shared_smem(i64*, i64);
+declare i64 @agg_sum_skip_val_shared_smem(i64*, i64, i64);
 declare i32 @agg_sum_int32_shared(i32*, i32);
 declare i32 @agg_sum_int32_skip_val_shared(i32*, i32, i32);
 declare void @agg_sum_double_shared(i64*, double);
@@ -812,6 +817,8 @@ declare void @agg_sum_float_shared(i32*, float);
 declare void @agg_sum_float_skip_val_shared(i32*, float, float);
 declare i64 @agg_sum_if_shared(i64*, i64, i8);
 declare i64 @agg_sum_if_skip_val_shared(i64*, i64, i64, i8);
+declare i64 @agg_sum_if_shared_smem(i64*, i64, i8);
+declare i64 @agg_sum_if_skip_val_shared_smem(i64*, i64, i64, i8);
 declare i32 @agg_sum_if_int32_shared(i32*, i32, i8);
 declare i32 @agg_sum_if_int32_skip_val_shared(i32*, i32, i32, i8);
 declare void @agg_sum_if_double_shared(i64*, double, i8);
@@ -2747,6 +2754,17 @@ bool has_case_expr_within_groupby_expr(RelAlgExecutionUnit const& ra_exe_unit) {
   return false;
 }
 
+bool has_reduction_function_on_gpu(const QueryMemoryDescriptor* query_mem_desc_ptr) {
+  if ((query_mem_desc_ptr->getQueryDescriptionType() ==
+           QueryDescriptionType::GroupByPerfectHash &&
+       query_mem_desc_ptr->hasKeylessHash()) ||
+      query_mem_desc_ptr->getQueryDescriptionType() ==
+          QueryDescriptionType::NonGroupedAggregate) {
+    return true;
+  }
+  return false;
+}
+
 bool is_gpu_shared_mem_supported(const QueryMemoryDescriptor* query_mem_desc_ptr,
                                  const RelAlgExecutionUnit& ra_exe_unit,
                                  const CudaMgr_Namespace::CudaMgr* cuda_mgr,
@@ -2799,15 +2817,24 @@ bool is_gpu_shared_mem_supported(const QueryMemoryDescriptor* query_mem_desc_ptr
       return true;
     }
   }
-  if (query_mem_desc_ptr->getQueryDescriptionType() ==
-          QueryDescriptionType::GroupByPerfectHash &&
+
+  // Estimator cannot use the shared memory yet
+  if (!!ra_exe_unit.estimator) {
+    return false;
+  }
+
+  if ((query_mem_desc_ptr->getQueryDescriptionType() ==
+           QueryDescriptionType::GroupByPerfectHash ||
+       query_mem_desc_ptr->getQueryDescriptionType() ==
+           QueryDescriptionType::GroupByBaselineHash) &&
       g_enable_smem_group_by) {
     // Fundamentally, we should use shared memory whenever the output buffer
     // is small enough so that we can fit it in the shared memory and yet expect
     // good occupancy.
-    // For now, we allow keyless, row-wise layout, and only for perfect hash
-    // group by operations.
-    if (query_mem_desc_ptr->hasKeylessHash() &&
+    // For now, we allow row-wise layout running reduction on GPU
+    // For keyless perfect hash and running reduction on CPU for baselinehash
+
+    if ((query_mem_desc_ptr->hasKeylessHash() || g_enable_smem_grouped_all) &&
         query_mem_desc_ptr->countDistinctDescriptorsLogicallyEmpty() &&
         !query_mem_desc_ptr->useStreamingTopN()) {
       const size_t shared_memory_threshold_bytes = std::min(
@@ -2819,31 +2846,80 @@ bool is_gpu_shared_mem_supported(const QueryMemoryDescriptor* query_mem_desc_ptr
         return false;
       }
 
+      struct weigth {
+        int sm_i64;  // shared memory int64
+        int sm;      // shared memory other types
+        int gm;      // global memory
+      };
+
       // skip shared memory usage when dealing with 1) variable length targets, 2)
       // non-basic aggregates (COUNT, SUM, MIN, MAX, AVG)
       // TODO: relax this if necessary
+      // The atomic sum on shared memory for int64 is slower than the corrispetive on
+      // global memory. We decide if using GMEM or SMEM weighting all the aggregations in
+      // the group by.
       const auto target_infos =
           target_exprs_to_infos(ra_exe_unit.target_exprs, *query_mem_desc_ptr);
-      std::unordered_set<SQLAgg> supported_aggs{kCOUNT, kCOUNT_IF};
+
+      // TODO calculate the weigthing of aggregates collecting some system
+      // statistics at the startup of the server
+      std::unordered_map<SQLAgg, struct weigth> supported_aggs{{kCOUNT, {10, 10, 30}},
+                                                               {kCOUNT_IF, {5, 5, 15}}};
       if (g_enable_smem_grouped_non_count_agg) {
-        supported_aggs = {kCOUNT, kCOUNT_IF, kMIN, kMAX, kSUM, kSUM_IF, kAVG};
+        supported_aggs = {{kCOUNT, {10, 10, 50}},
+                          {kCOUNT_IF, {5, 5, 25}},
+                          {kMIN, {10, 10, 50}},
+                          {kMAX, {10, 10, 50}}};
+        if (g_enable_smem_opt_sum || query_mem_desc_ptr->getQueryDescriptionType() ==
+                                         QueryDescriptionType::GroupByBaselineHash) {
+          // in case we are using an optimized sum or we are running a BaselineHash
+          // we will weight the shared memory sum operations differently
+          supported_aggs.insert(
+              {{kSUM, {30, 30, 90}}, {kSUM_IF, {15, 15, 45}}, {kAVG, {40, 40, 115}}});
+        } else {
+          supported_aggs.insert(
+              {{kSUM, {200, 30, 90}}, {kSUM_IF, {100, 15, 45}}, {kAVG, {210, 40, 115}}});
+        }
       }
-      if (std::find_if(target_infos.begin(),
-                       target_infos.end(),
-                       [&supported_aggs](const TargetInfo& ti) {
-                         if (ti.sql_type.is_varlen() ||
-                             !supported_aggs.count(ti.agg_kind)) {
-                           return true;
-                         } else {
-                           return false;
-                         }
-                       }) == target_infos.end()) {
-        return true;
+      int sm_weigthed = 0;
+      int gm_weigthed = 0;
+      if (std::find_if(
+              target_infos.begin(),
+              target_infos.end(),
+              [&supported_aggs, &sm_weigthed, &gm_weigthed](const TargetInfo& ti) {
+                if (ti.is_agg) {
+                  auto agg = supported_aggs.find(ti.agg_kind);
+                  if (agg == supported_aggs.end() || ti.sql_type.is_varlen()) {
+                    return true;
+                  } else {
+                    if (!ti.sql_type.is_fp() ||
+                        ti.sql_type.get_size() == sizeof(int64_t)) {
+                      sm_weigthed += agg->second.sm_i64;
+                    } else {
+                      sm_weigthed += agg->second.sm;
+                    }
+                    gm_weigthed += agg->second.gm;
+                  }
+                  return false;
+                }
+                // those are generic weigths for each key in the group by clause
+                sm_weigthed += 1;
+                gm_weigthed += 3;
+                return false;
+              }) == target_infos.end()) {
+        if (g_enable_smem_weigth) {
+          VLOG(1) << "Aggregations weigthed Shared Memory: " << sm_weigthed
+                  << " Global Memory: " << gm_weigthed
+                  << " Is shared memory used: " << (sm_weigthed < gm_weigthed);
+        }
+        if (sm_weigthed < gm_weigthed || !g_enable_smem_weigth) {
+          return true;
+        }
       }
     }
   }
   return false;
-}
+}  // namespace
 
 #ifndef NDEBUG
 std::string serialize_llvm_metadata_footnotes(llvm::Function* query_func,
@@ -2987,9 +3063,11 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
                                   cuda_mgr ? this->blockSize() : 1,
                                   cuda_mgr ? this->numBlocksPerMP() : 1);
   if (gpu_shared_mem_optimization) {
-    query_mem_desc->enableGpuSharedMemory();
     // disable interleaved bins optimization on the GPU
     query_mem_desc->setHasInterleavedBinsOnGpu(false);
+    query_mem_desc->setSharedMemoryUsed(true);
+    query_mem_desc->setReductionOnGpu(
+        has_reduction_function_on_gpu(query_mem_desc.get()));
     auto const used_shared_mem_size =
         get_shared_memory_size(gpu_shared_mem_optimization, query_mem_desc.get());
     auto const total_shared_mem_size =
@@ -3000,7 +3078,8 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
             << " / " << total_shared_mem_size << " bytes are used)";
   }
   const GpuSharedMemoryContext gpu_smem_context(
-      get_shared_memory_size(gpu_shared_mem_optimization, query_mem_desc.get()));
+      get_shared_memory_size(gpu_shared_mem_optimization, query_mem_desc.get()),
+      has_reduction_function_on_gpu(query_mem_desc.get()));
 
   if (co.device_type == ExecutorDeviceType::GPU) {
     const size_t num_count_distinct_descs =
@@ -3218,7 +3297,7 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
    * into the already compiled query_func (replacing two placeholders, write_back_nop and
    * init_smem_nop). The rest of the code should be as before (row_func, etc.).
    */
-  if (gpu_smem_context.isSharedMemoryUsed()) {
+  if (gpu_smem_context.isSharedMemoryUsed() && gpu_smem_context.hasReductionOnGpu()) {
     if (query_mem_desc->getQueryDescriptionType() ==
         QueryDescriptionType::GroupByPerfectHash) {
       GpuSharedMemCodeBuilder gpu_smem_code(

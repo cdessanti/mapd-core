@@ -500,7 +500,8 @@ QueryMemoryDescriptor::QueryMemoryDescriptor(
     , use_streaming_top_n_(use_streaming_top_n)
     , threads_can_reuse_group_by_buffers_(threads_can_reuse_group_by_buffers)
     , force_4byte_float_(false)
-    , gpu_shared_mem_used_(false)
+    , reduction_on_gpu_(false)
+    , gpu_shared_memory_used_(false)
     , col_slot_context_(col_slot_context)
     , num_available_threads_(cpu_threads()) {
   CHECK(!(query_desc_type_ == QueryDescriptionType::TableFunction));
@@ -578,7 +579,8 @@ QueryMemoryDescriptor::QueryMemoryDescriptor()
     , use_streaming_top_n_(false)
     , threads_can_reuse_group_by_buffers_(false)
     , force_4byte_float_(false)
-    , gpu_shared_mem_used_(false) {}
+    , reduction_on_gpu_(false)
+    , gpu_shared_memory_used_(false) {}
 
 QueryMemoryDescriptor::QueryMemoryDescriptor(const Executor* executor,
                                              const size_t entry_count,
@@ -602,7 +604,8 @@ QueryMemoryDescriptor::QueryMemoryDescriptor(const Executor* executor,
     , use_streaming_top_n_(false)
     , threads_can_reuse_group_by_buffers_(false)
     , force_4byte_float_(false)
-    , gpu_shared_mem_used_(false)
+    , reduction_on_gpu_(false)
+    , gpu_shared_memory_used_(false)
     , num_available_threads_(cpu_threads()) {
   if (query_desc_type == QueryDescriptionType::TableFunction) {
     // Table functions output columns are always columnar
@@ -635,7 +638,8 @@ QueryMemoryDescriptor::QueryMemoryDescriptor(const QueryDescriptionType query_de
     , use_streaming_top_n_(false)
     , threads_can_reuse_group_by_buffers_(false)
     , force_4byte_float_(false)
-    , gpu_shared_mem_used_(false)
+    , reduction_on_gpu_(false)
+    , gpu_shared_memory_used_(false)
     , num_available_threads_(cpu_threads()) {}
 
 bool QueryMemoryDescriptor::operator==(const QueryMemoryDescriptor& other) const {
@@ -656,7 +660,10 @@ bool QueryMemoryDescriptor::operator==(const QueryMemoryDescriptor& other) const
   if (force_4byte_float_ != other.force_4byte_float_) {
     return false;
   }
-  if (gpu_shared_mem_used_ != other.gpu_shared_mem_used_) {
+  if (gpu_shared_memory_used_ != other.gpu_shared_memory_used_) {
+    return false;
+  }
+  if (reduction_on_gpu_ != other.reduction_on_gpu_) {
     return false;
   }
   if (group_col_widths_ != other.group_col_widths_) {
@@ -1162,13 +1169,19 @@ bool QueryMemoryDescriptor::blocksShareMemory() const {
   // logic
   auto const has_count_distinct_op =
       !countDescriptorsLogicallyEmpty(count_distinct_descriptors_);
-  if (g_cluster || executor_->isCPUOnly() || render_output_ || isGpuSharedMemoryUsed() ||
-      has_count_distinct_op) {
+  if (g_cluster || executor_->isCPUOnly() || render_output_ ||
+      (isGpuSharedMemoryUsed() && hasReductionOnGpu()) || has_count_distinct_op) {
     return true;
   }
   if (query_desc_type_ == QueryDescriptionType::Projection ||
       query_desc_type_ == QueryDescriptionType::TableFunction) {
     return true;
+  }
+  if (isGpuSharedMemoryUsed() && !hasReductionOnGpu()) {
+    // the implementation of shared memory without reduction on GPU needs
+    // that an output buffer is created for each block in the grid
+    // we cannot rely on many_entries function so we exit with false immediatly
+    return false;
   }
   if (query_desc_type_ == QueryDescriptionType::GroupByBaselineHash) {
     // create a single output buffer that is shared among all CUDA blocks
@@ -1179,8 +1192,7 @@ bool QueryMemoryDescriptor::blocksShareMemory() const {
     return many_entries(entry_count_, 0, bucket_, kLargeGroupbyEntryCount);
   }
   if (query_desc_type_ == QueryDescriptionType::GroupByPerfectHash) {
-    return getGroupbyColCount() > 1 ||
-           many_entries(max_val_, min_val_, bucket_, kLargeGroupbyEntryCount);
+    return many_entries(max_val_, min_val_, bucket_, kLargeGroupbyEntryCount);
   }
   return false;
 }
@@ -1309,6 +1321,8 @@ std::string QueryMemoryDescriptor::toString() const {
   str += "\tMin Val (perfect hash only): " + std::to_string(min_val_) + "\n";
   str += "\tMax Val (perfect hash only): " + std::to_string(max_val_) + "\n";
   str += "\tBucket Val (perfect hash only): " + std::to_string(bucket_) + "\n";
+  str += "\tGpu Shared Memory Used: " + ::toString(gpu_shared_memory_used_) + "\n";
+  str += "\tShared Memory Reduction on GPU: " + ::toString(reduction_on_gpu_) + "\n";
   str += "\tSort on GPU: " + ::toString(sort_on_gpu_) + "\n";
   str += "\tUse Streaming Top N: " + ::toString(use_streaming_top_n_) + "\n";
   str += "\tOutput Columnar: " + ::toString(output_columnar_) + "\n";

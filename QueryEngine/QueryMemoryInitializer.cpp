@@ -406,6 +406,7 @@ QueryMemoryInitializer::QueryMemoryInitializer(
   // Multiple group-by-buffers should only be used on GPU,
   // whereas buffer reuse only is done on CPU
   CHECK(group_buffers_count <= 1 || !query_mem_desc.threadsCanReuseGroupByBuffers());
+  VLOG(1) << "Initializing CPU " << group_buffers_count / step << " group by buffers ";
   for (size_t i = 0; i < group_buffers_count; i += step) {
     auto group_by_info =
         alloc_group_by_buffer(actual_group_buffer_size,
@@ -468,6 +469,8 @@ QueryMemoryInitializer::QueryMemoryInitializer(
     result_sets_[old_size]->allocateStorage(reinterpret_cast<int8_t*>(group_by_buffer),
                                             executor->plan_state_->init_agg_vals_,
                                             getVarlenOutputInfo());
+
+    VLOG(1) << "Initialized CPU " << group_buffers_count / step << " group by buffers ";
   }
 }
 
@@ -1226,37 +1229,54 @@ GpuGroupByBuffers QueryMemoryInitializer::createAndInitializeGroupByBufferGpu(
         query_mem_desc.interleavedBins(ExecutorDeviceType::GPU) ? warp_size : 1;
     const auto num_group_by_buffers =
         getGroupByBuffersSize() - (query_mem_desc.hasVarlenOutput() ? 1 : 0);
-    for (size_t i = 0; i < num_group_by_buffers; i += step) {
-      if (output_columnar) {
-        init_columnar_group_by_buffer_on_device(
-            reinterpret_cast<int64_t*>(group_by_dev_buffer),
-            reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
-            dev_group_by_buffers.entry_count,
-            query_mem_desc.getGroupbyColCount(),
-            col_count,
-            col_widths_dev_ptr,
-            /*need_padding = */ true,
-            query_mem_desc.hasKeylessHash(),
-            sizeof(int64_t),
-            block_size_x,
-            grid_size_x,
-            cuda_stream);
-      } else {
-        init_group_by_buffer_on_device(
-            reinterpret_cast<int64_t*>(group_by_dev_buffer),
-            reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
-            dev_group_by_buffers.entry_count,
-            query_mem_desc.getGroupbyColCount(),
-            query_mem_desc.getEffectiveKeyWidth(),
-            query_mem_desc.getRowSize() / sizeof(int64_t),
-            query_mem_desc.hasKeylessHash(),
-            warp_count,
-            block_size_x,
-            grid_size_x,
-            cuda_stream);
+    VLOG(1) << "Initializing " << num_group_by_buffers / step << " group by buffers ";
+    if (!output_columnar && !query_mem_desc.hasVarlenOutput()) {
+      init_group_by_buffer_on_device(
+          reinterpret_cast<int64_t*>(group_by_dev_buffer),
+          reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
+          dev_group_by_buffers.entry_count * (num_group_by_buffers / step),
+          query_mem_desc.getGroupbyColCount(),
+          query_mem_desc.getEffectiveKeyWidth(),
+          query_mem_desc.getRowSize() / sizeof(int64_t),
+          query_mem_desc.hasKeylessHash(),
+          warp_count,
+          block_size_x,
+          grid_size_x,
+          cuda_stream);
+    } else {
+      for (size_t i = 0; i < num_group_by_buffers; i += step) {
+        if (output_columnar) {
+          init_columnar_group_by_buffer_on_device(
+              reinterpret_cast<int64_t*>(group_by_dev_buffer),
+              reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
+              dev_group_by_buffers.entry_count,
+              query_mem_desc.getGroupbyColCount(),
+              col_count,
+              col_widths_dev_ptr,
+              /*need_padding = */ true,
+              query_mem_desc.hasKeylessHash(),
+              sizeof(int64_t),
+              block_size_x,
+              grid_size_x,
+              cuda_stream);
+        } else {
+          init_group_by_buffer_on_device(
+              reinterpret_cast<int64_t*>(group_by_dev_buffer),
+              reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
+              dev_group_by_buffers.entry_count,
+              query_mem_desc.getGroupbyColCount(),
+              query_mem_desc.getEffectiveKeyWidth(),
+              query_mem_desc.getRowSize() / sizeof(int64_t),
+              query_mem_desc.hasKeylessHash(),
+              warp_count,
+              block_size_x,
+              grid_size_x,
+              cuda_stream);
+        }
+        group_by_dev_buffer += groups_buffer_size;
       }
-      group_by_dev_buffer += groups_buffer_size;
     }
+    VLOG(1) << "Initialized " << num_group_by_buffers / step << " group by buffers ";
   }
   return dev_group_by_buffers;
 #else

@@ -66,9 +66,11 @@ extern "C" __device__ int64_t* declare_dynamic_shared_memory() {
 }
 
 /**
- * Initializes the shared memory buffer for perfect hash group by.
+ * Initializes the shared memory buffer for keyed perfect hash and baseline hash group bys
  * In this function, we simply copy the global group by buffer (already initialized on the
  * host and transferred) to all shared memory group by buffers.
+ * The output buffer is copied back to gmem with the copy_out_buf_smem_to_gmem function.
+ * In case of a keyless pefect hash the function is replaced with a proper init functon
  */
 extern "C" __device__ const int64_t* init_shared_mem(const int64_t* global_groups_buffer,
                                                      const int32_t groups_buffer_size) {
@@ -84,6 +86,17 @@ extern "C" __device__ const int64_t* init_shared_mem(const int64_t* global_group
   }
   __syncthreads();
   return shared_groups_buffer;
+}
+
+extern "C" __device__ void copy_out_buf_smem_to_gmem(int64_t* global_groups_buffer,
+                                                     const int64_t* shared_groups_buffer,
+                                                     const int32_t groups_buffer_size) {
+  const int32_t buffer_units = groups_buffer_size >> 3;
+
+  __syncthreads();
+  for (int32_t pos = threadIdx.x; pos < buffer_units; pos += blockDim.x) {
+    global_groups_buffer[pos] = shared_groups_buffer[pos];
+  }
 }
 
 #define init_group_by_buffer_gpu_impl init_group_by_buffer_gpu
@@ -434,6 +447,37 @@ __device__ double atomicMin(float* address, float val) {
   return __int_as_float(old);
 }
 
+__device__ int64_t atomicSum64SkipVal(int64_t* address,
+                                      const int64_t val,
+                                      const int64_t skip_val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  int64_t old = atomicExch(address_as_ull, 0);
+  int64_t old2 = atomicAdd(address_as_ull, old == skip_val ? val : (val + old));
+  return old == skip_val ? old2 : (old2 + old);
+}
+
+__device__ int64_t atomicSum64SMem(int64_t* address, const int64_t val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  int64_t old = val;
+  while ((old = atomicExch(address_as_ull, atomicExch(address_as_ull, 0) + old)) != 0)
+    ;
+  return old;
+}
+
+__device__ int64_t atomicSum64SkipValSMem(int64_t* address,
+                                          const int64_t val,
+                                          const int64_t skip_val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  int64_t old = val;
+  int64_t old2 = atomicCAS(address_as_ull, skip_val, val);
+  if (old2 == skip_val) {
+    return val;
+  }
+  while ((old = atomicExch(address_as_ull, atomicExch(address_as_ull, 0) + old)) != 0)
+    ;
+  return old;
+}
+
 extern "C" __device__ uint64_t agg_count_shared(uint64_t* agg, const int64_t val) {
   return static_cast<uint64_t>(atomicAdd(reinterpret_cast<uint32_t*>(agg), 1U));
 }
@@ -464,6 +508,10 @@ extern "C" __device__ int64_t agg_sum_shared(int64_t* agg, const int64_t val) {
   return atomicAdd(reinterpret_cast<unsigned long long*>(agg), val);
 }
 
+extern "C" __device__ int64_t agg_sum_shared_smem(int64_t* agg, const int64_t val) {
+  return atomicSum64SMem(agg, val);
+}
+
 extern "C" __device__ int32_t agg_sum_int32_shared(int32_t* agg, const int32_t val) {
   return atomicAdd(agg, val);
 }
@@ -482,6 +530,15 @@ extern "C" __device__ int64_t agg_sum_if_shared(int64_t* agg,
   static_assert(sizeof(int64_t) == sizeof(unsigned long long));
   if (cond) {
     return atomicAdd(reinterpret_cast<unsigned long long*>(agg), val);
+  }
+  return *agg;
+}
+
+extern "C" __device__ int64_t agg_sum_if_shared_smem(int64_t* agg,
+                                                     const int64_t val,
+                                                     const int8_t cond) {
+  if (cond) {
+    return atomicSum64SMem(agg, val);
   }
   return *agg;
 }
@@ -978,15 +1035,6 @@ extern "C" __device__ int32_t agg_sum_if_int32_skip_val_shared(int32_t* agg,
   return cond ? agg_sum_int32_skip_val_shared(agg, val, skip_val) : *agg;
 }
 
-__device__ int64_t atomicSum64SkipVal(int64_t* address,
-                                      const int64_t val,
-                                      const int64_t skip_val) {
-  unsigned long long int* address_as_ull = (unsigned long long int*)address;
-  int64_t old = atomicExch(address_as_ull, 0);
-  int64_t old2 = atomicAdd(address_as_ull, old == skip_val ? val : (val + old));
-  return old == skip_val ? old2 : (old2 + old);
-}
-
 extern "C" __device__ int64_t agg_sum_skip_val_shared(int64_t* agg,
                                                       const int64_t val,
                                                       const int64_t skip_val) {
@@ -996,10 +1044,26 @@ extern "C" __device__ int64_t agg_sum_skip_val_shared(int64_t* agg,
   return 0;
 }
 
+extern "C" __device__ int64_t agg_sum_skip_val_shared_smem(int64_t* agg,
+                                                           const int64_t val,
+                                                           const int64_t skip_val) {
+  if (val != skip_val) {
+    return atomicSum64SkipValSMem(agg, val, skip_val);
+  }
+  return 0;
+}
+
 extern "C" __device__ int64_t agg_sum_if_skip_val_shared(int64_t* agg,
                                                          const int64_t val,
                                                          const int64_t skip_val,
                                                          const int8_t cond) {
+  return cond ? agg_sum_skip_val_shared(agg, val, skip_val) : *agg;
+}
+
+extern "C" __device__ int64_t agg_sum_if_skip_val_shared_smem(int64_t* agg,
+                                                              const int64_t val,
+                                                              const int64_t skip_val,
+                                                              const int8_t cond) {
   return cond ? agg_sum_skip_val_shared(agg, val, skip_val) : *agg;
 }
 

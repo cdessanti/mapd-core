@@ -1209,6 +1209,10 @@ extern "C" RUNTIME_EXPORT ALWAYS_INLINE void agg_count_distinct_bitmap_skip_val(
   }
 }
 
+extern "C" GPU_RT_STUB NEVER_INLINE void copy_out_buf_smem_to_gmem(int64_t* dest,
+                                                                   int64_t* src,
+                                                                   const int32_t sz) {}
+
 extern "C" GPU_RT_STUB void agg_count_distinct_bitmap_skip_val_gpu(int64_t*,
                                                                    const int64_t,
                                                                    const int64_t,
@@ -1770,6 +1774,29 @@ extern "C" GPU_RT_STUB int64_t agg_sum_if_skip_val_shared(int64_t* agg,
                                                           const int8_t cond) {
   return 0;
 }
+extern "C" GPU_RT_STUB int64_t agg_sum_shared_smem(int64_t* agg, const int64_t val) {
+  return 0;
+}
+
+extern "C" GPU_RT_STUB int64_t agg_sum_if_shared_smem(int64_t* agg,
+                                                      const int64_t val,
+                                                      const int8_t cond) {
+  return 0;
+}
+
+extern "C" GPU_RT_STUB int64_t agg_sum_skip_val_shared_smem(int64_t* agg,
+                                                            const int64_t val,
+                                                            const int64_t skip_val) {
+  return 0;
+}
+
+extern "C" GPU_RT_STUB int64_t agg_sum_if_skip_val_shared_smem(int64_t* agg,
+                                                               const int64_t val,
+                                                               const int64_t skip_val,
+                                                               const int8_t cond) {
+  return 0;
+}
+
 extern "C" GPU_RT_STUB int32_t agg_sum_int32_shared(int32_t* agg, const int32_t val) {
   return 0;
 }

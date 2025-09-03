@@ -327,11 +327,13 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_template(
       CHECK(init_smem_func);
       // only one slot per aggregate column is needed, and so we can initialize shared
       // memory buffer for intermediate results to be exactly like the agg_init_val array
+      auto size_of_buffer = gpu_smem_context.hasReductionOnGpu()
+                                ? gpu_smem_context.getSharedMemorySize()
+                                : aggr_col_count * sizeof(int64_t);
       smem_output_buffer = CallInst::Create(
           init_smem_func,
-          std::vector<llvm::Value*>{
-              agg_init_val,
-              llvm::ConstantInt::get(i32_type, aggr_col_count * sizeof(int64_t))},
+          std::vector<llvm::Value*>{agg_init_val,
+                                    llvm::ConstantInt::get(i32_type, size_of_buffer)},
           "smem_buffer",
           bb_entry);
     }
@@ -470,7 +472,7 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_template(
     llvm::Value* const frag_idx = get_arg_by_name(query_func_ptr, "frag_idx");
     for (size_t i = 0; i < aggr_col_count; ++i) {
       auto col_idx = ConstantInt::get(i32_type, i);
-      if (gpu_smem_context.isSharedMemoryUsed()) {
+      if (gpu_smem_context.isSharedMemoryUsed() && gpu_smem_context.hasReductionOnGpu()) {
         auto target_addr = GetElementPtrInst::CreateInBounds(
             smem_output_buffer->getType()->getPointerElementType(),
             smem_output_buffer,
@@ -504,7 +506,7 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_template(
         result_st->setAlignment(LLVM_ALIGN(8));
       }
     }
-    if (gpu_smem_context.isSharedMemoryUsed()) {
+    if (gpu_smem_context.isSharedMemoryUsed() && gpu_smem_context.hasReductionOnGpu()) {
       // final reduction of results from shared memory buffer back into global memory.
       auto sync_thread_func = mod->getFunction("sync_threadblock");
       CHECK(sync_thread_func);
@@ -578,7 +580,10 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_group_by_template(
                                             : mod->getFunction("init_shared_mem_nop");
   CHECK(func_init_shared_mem);
 
-  auto func_write_back = mod->getFunction("write_back_nop");
+  auto func_write_back =
+      gpu_smem_context.isSharedMemoryUsed() && !gpu_smem_context.hasReductionOnGpu()
+          ? mod->getFunction("copy_out_buf_smem_to_gmem")
+          : mod->getFunction("write_back_nop");
   CHECK(func_write_back);
 
   constexpr bool IS_GROUP_BY = true;

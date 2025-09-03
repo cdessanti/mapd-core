@@ -955,6 +955,11 @@ void CommandLineOptions::fillDeveloperOptions() {
       po::value<size_t>(&g_gpu_smem_threshold)->default_value(g_gpu_smem_threshold),
       "GPU shared memory threshold (in bytes). If query requires larger buffers than "
       "this threshold, we disable those optimizations. 0 (default) means no static cap.");
+  desc.add_options()("enable-shared-mem-grouped-all",
+                     po::value<bool>(&g_enable_smem_grouped_all)
+                         ->default_value(g_enable_smem_grouped_all)
+                         ->implicit_value(true),
+                     "Enable using GPU shared memory for all kind of grouped queries.");
   desc.add_options()(
       "enable-shared-mem-grouped-non-count-agg",
       po::value<bool>(&g_enable_smem_grouped_non_count_agg)
@@ -966,6 +971,16 @@ void CommandLineOptions::fillDeveloperOptions() {
                          ->default_value(g_enable_smem_non_grouped_agg)
                          ->implicit_value(true),
                      "Enable using GPU shared memory for non-grouped aggregate queries.");
+  desc.add_options()("enable-shared-mem-weigth",
+                     po::value<bool>(&g_enable_smem_weigth)
+                         ->default_value(g_enable_smem_weigth)
+                         ->implicit_value(true),
+                     "Enable weigth calculation for shared memory usage.");
+  desc.add_options()("enable-shared-mem-optimized-sum",
+                     po::value<bool>(&g_enable_smem_opt_sum)
+                         ->default_value(g_enable_smem_opt_sum)
+                         ->implicit_value(true),
+                     "Speed up SUM and AVG 64bit aggregates when using shared memory.");
   desc.add_options()("enable-direct-columnarization",
                      po::value<bool>(&g_enable_direct_columnarization)
                          ->default_value(g_enable_direct_columnarization)

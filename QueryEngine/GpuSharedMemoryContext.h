@@ -22,16 +22,18 @@
 class GpuSharedMemoryContext {
  public:
   GpuSharedMemoryContext() : shared_memory_size_(0) {}
-  GpuSharedMemoryContext(const size_t shared_mem_size)
-      : shared_memory_size_(shared_mem_size) {
+  GpuSharedMemoryContext(const size_t shared_mem_size, const bool reduction_on_gpu = true)
+      : shared_memory_size_(shared_mem_size), reduction_on_gpu_(reduction_on_gpu) {
     CHECK(shared_mem_size >= 0);
   }
 
   bool isSharedMemoryUsed() const { return shared_memory_size_ > 0; }
+  bool hasReductionOnGpu() const { return reduction_on_gpu_; }
   size_t getSharedMemorySize() const { return shared_memory_size_; }
 
  private:
   size_t shared_memory_size_;
+  bool reduction_on_gpu_;
 };
 
 inline std::ostream& operator<<(std::ostream& os, GpuSharedMemoryContext const ctx) {
