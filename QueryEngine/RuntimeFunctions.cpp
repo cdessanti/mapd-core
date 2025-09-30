@@ -396,6 +396,16 @@ extern "C" GPU_RT_STUB int32_t agg_mode_func_gpu(int64_t* agg,
   return {};
 }
 
+extern "C" GPU_RT_STUB int64_t* get_group_value_rd(
+    int64_t* groups_buffer,
+    const uint32_t groups_buffer_entry_count,
+    const int64_t* key,
+    const uint32_t key_count,
+    const uint32_t key_width,
+    const uint32_t row_size_quad) {
+  return 0;
+}
+
 extern "C" RUNTIME_EXPORT NEVER_INLINE void
 agg_approximate_count_distinct(int64_t* agg, const int64_t key, const uint32_t b) {
   const uint64_t hash = MurmurHash64A(&key, sizeof(key), 0);
@@ -2114,6 +2124,28 @@ extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t* get_matching_group_value_perfec
     }
   }
   return groups_buffer + off + key_count;
+}
+
+extern "C" RUNTIME_EXPORT ALWAYS_INLINE void copy_group_value_perfect_hash_i64(
+    int64_t* gmem_buffer,
+    const int64_t* smem_buffer,
+    int32_t key_count) {
+  if (gmem_buffer[0] == EMPTY_KEY_64) {
+    for (int32_t i = 0; i < key_count; ++i) {
+      gmem_buffer[i] = smem_buffer[i];
+    }
+  }
+}
+
+extern "C" RUNTIME_EXPORT ALWAYS_INLINE void copy_group_value_perfect_hash_i32(
+    int32_t* gmem_buffer,
+    const int32_t* smem_buffer,
+    int32_t key_count) {
+  if (gmem_buffer[0] == EMPTY_KEY_32) {
+    for (int32_t i = 0; i < key_count; ++i) {
+      gmem_buffer[i] = smem_buffer[i];
+    }
+  }
 }
 
 /**

@@ -221,6 +221,16 @@ extern "C" RUNTIME_EXPORT uint32_t get_columnar_group_bin_offset(int64_t* key_ba
                                                                  const int64_t min_key,
                                                                  const int64_t bucket);
 
+extern "C" RUNTIME_EXPORT ALWAYS_INLINE void copy_group_value_perfect_hash_i64(
+    int64_t* gmem_buffer,
+    const int64_t* smem_buffer,
+    const int32_t key_count);
+
+extern "C" RUNTIME_EXPORT ALWAYS_INLINE void copy_group_value_perfect_hash_i32(
+    int32_t* gmem_buffer,
+    const int32_t* smem_buffer,
+    int32_t key_count);
+
 extern "C" RUNTIME_EXPORT int64_t* get_matching_group_value_perfect_hash(
     int64_t* groups_buffer,
     const uint32_t h,

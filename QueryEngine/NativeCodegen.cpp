@@ -86,6 +86,7 @@ using heavyai::ErrorCode;
 float g_fraction_code_cache_to_evict = 0.2;
 bool g_enable_smem_weigth{false};
 bool g_enable_smem_opt_sum{false};
+bool g_enable_gpu_insitu_reduction{false};
 
 #ifdef ENABLE_GEOS
 
@@ -778,6 +779,7 @@ declare i64* @declare_dynamic_shared_memory();
 declare void @write_back_nop(i64*, i64*, i32);
 declare void @write_back_non_grouped_agg(i64*, i64*, i32);
 declare void @init_group_by_buffer_gpu(i64*, i64*, i32, i32, i32, i1, i8);
+declare i64* @get_group_value_rd(i64*, i32, i64*, i32, i32, i32);
 declare i64* @get_group_value(i64*, i32, i64*, i32, i32, i32);
 declare i64* @get_group_value_with_watchdog(i64*, i32, i64*, i32, i32, i32);
 declare i32 @get_group_value_columnar_slot(i64*, i32, i64*, i32, i32);
@@ -2755,7 +2757,12 @@ bool has_case_expr_within_groupby_expr(RelAlgExecutionUnit const& ra_exe_unit) {
 }
 
 bool has_reduction_function_on_gpu(const QueryMemoryDescriptor* query_mem_desc_ptr) {
-  if ((query_mem_desc_ptr->getQueryDescriptionType() ==
+  if (((query_mem_desc_ptr->getQueryDescriptionType() ==
+            QueryDescriptionType::GroupByPerfectHash ||
+        query_mem_desc_ptr->getQueryDescriptionType() ==
+            QueryDescriptionType::GroupByBaselineHash) &&
+       g_enable_gpu_insitu_reduction) ||
+      (query_mem_desc_ptr->getQueryDescriptionType() ==
            QueryDescriptionType::GroupByPerfectHash &&
        query_mem_desc_ptr->hasKeylessHash()) ||
       query_mem_desc_ptr->getQueryDescriptionType() ==
@@ -3299,7 +3306,9 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
    */
   if (gpu_smem_context.isSharedMemoryUsed() && gpu_smem_context.hasReductionOnGpu()) {
     if (query_mem_desc->getQueryDescriptionType() ==
-        QueryDescriptionType::GroupByPerfectHash) {
+            QueryDescriptionType::GroupByPerfectHash ||
+        query_mem_desc->getQueryDescriptionType() ==
+            QueryDescriptionType::GroupByBaselineHash) {
       GpuSharedMemCodeBuilder gpu_smem_code(
           cgen_state_->module_,
           cgen_state_->context_,

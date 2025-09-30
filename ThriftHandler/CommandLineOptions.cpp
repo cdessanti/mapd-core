@@ -981,6 +981,11 @@ void CommandLineOptions::fillDeveloperOptions() {
                          ->default_value(g_enable_smem_opt_sum)
                          ->implicit_value(true),
                      "Speed up SUM and AVG 64bit aggregates when using shared memory.");
+  desc.add_options()("enable-gpu-insitu-reduction",
+                     po::value<bool>(&g_enable_gpu_insitu_reduction)
+                         ->default_value(g_enable_gpu_insitu_reduction)
+                         ->implicit_value(true),
+                     "Enable the reduction of shared memory keyed perfect and baseline hash on local GPU.");
   desc.add_options()("enable-direct-columnarization",
                      po::value<bool>(&g_enable_direct_columnarization)
                          ->default_value(g_enable_direct_columnarization)

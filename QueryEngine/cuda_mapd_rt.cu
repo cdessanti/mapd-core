@@ -347,6 +347,32 @@ extern "C" __device__ int64_t* get_matching_group_value_columnar(
 #include "MurmurHash.cpp"
 #include "TopKRuntime.cpp"
 
+extern "C" __device__ int64_t* get_group_value_rd(
+    int64_t* groups_buffer,
+    const uint32_t groups_buffer_entry_count,
+    const int64_t* key,
+    const uint32_t key_count,
+    const uint32_t key_width,
+    const uint32_t row_size_quad) {
+  uint32_t h = MurmurHash3(key, key_width * key_count, 0) % groups_buffer_entry_count;
+
+  int64_t* matching_group = get_matching_group_value(
+      groups_buffer, h, key, key_count, key_width, row_size_quad >> 3);
+  if (matching_group) {
+    return matching_group;
+  }
+  uint32_t h_probe = (h + 1) % groups_buffer_entry_count;
+  while (h_probe != h) {
+    matching_group = get_matching_group_value(
+        groups_buffer, h_probe, key, key_count, key_width, row_size_quad >> 3);
+    if (matching_group) {
+      return matching_group;
+    }
+    h_probe = (h_probe + 1) % groups_buffer_entry_count;
+  }
+  return NULL;
+}
+
 __device__ int64_t atomicMax64(int64_t* address, int64_t val) {
   unsigned long long int* address_as_ull = (unsigned long long int*)address;
   unsigned long long int old = *address_as_ull, assumed;

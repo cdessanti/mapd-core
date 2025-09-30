@@ -41,16 +41,11 @@ GpuSharedMemCodeBuilder::GpuSharedMemCodeBuilder(
    * This class currently works only with:
    * 1. row-wise output memory layout
    * 2. GroupByPerfectHash
-   * 3. single-column group by
-   * 4. Keyless hash strategy (no redundant group column in the output buffer)
    *
-   * All conditions in 1, 3, and 4 can be easily relaxed if proper code is added to
+   * The condition in 1 can be easily relaxed if proper code is added to
    * support them in the future.
    */
   CHECK(!query_mem_desc_.didOutputColumnar());
-  CHECK(query_mem_desc_.getQueryDescriptionType() ==
-        QueryDescriptionType::GroupByPerfectHash);
-  CHECK(query_mem_desc_.hasKeylessHash());
 }
 
 void GpuSharedMemCodeBuilder::codegen() {
@@ -165,6 +160,7 @@ void GpuSharedMemCodeBuilder::codegenReduction() {
   llvm::Linker linker(*module_);
   std::unique_ptr<llvm::Module> owner(reduction_code.module);
   bool link_error = linker.linkInModule(std::move(owner));
+  VLOG(1) << "Checking link error";
   CHECK(!link_error);
 
   // go through the reduction code and replace all agg. functions used in the logic
@@ -238,7 +234,9 @@ llvm::Value* codegen_smem_dest_slot_ptr(llvm::LLVMContext& context,
                                         llvm::Value* byte_offset) {
   const auto sql_type = get_compact_type(target_info);
   const auto slot_bytes = query_mem_desc.getPaddedSlotWidthBytes(slot_idx);
+
   auto ptr_type = [&context](const size_t slot_bytes, const SQLTypeInfo& sql_type) {
+    VLOG(1) << "Slot bytes " << slot_bytes;
     if (slot_bytes == sizeof(int32_t)) {
       return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
     } else {
@@ -258,6 +256,31 @@ llvm::Value* codegen_smem_dest_slot_ptr(llvm::LLVMContext& context,
       "dest_slot_adr_" + std::to_string(slot_idx));
   return casted_dest_slot_address;
 }
+llvm::Value* codegen_smem_dest_key_ptr(llvm::LLVMContext& context,
+                                       llvm::IRBuilder<>& ir_builder,
+                                       const size_t key_bytes,
+                                       llvm::Value* dest_byte_stream,
+                                       llvm::Value* byte_offset) {
+  auto ptr_type = [&context](const size_t key_bytes) {
+    if (key_bytes == sizeof(int32_t)) {
+      return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+    } else {
+      CHECK(key_bytes == sizeof(int64_t));
+      return llvm::Type::getInt64PtrTy(context, /*address_space=*/3);
+    }
+    UNREACHABLE() << "Invalid key size encountered: " << std::to_string(key_bytes);
+    return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+  };
+
+  const auto casted_dest_key_address = ir_builder.CreatePointerCast(
+      ir_builder.CreateGEP(
+          dest_byte_stream->getType()->getScalarType()->getPointerElementType(),
+          dest_byte_stream,
+          byte_offset),
+      ptr_type(key_bytes),
+      "dest_key_adr_" + std::to_string(key_bytes));
+  return casted_dest_key_address;
+}
 }  // namespace
 
 /**
@@ -273,8 +296,10 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   // it should be removed in the future.
   auto fixup_query_mem_desc = ResultSet::fixupQueryMemoryDescriptor(query_mem_desc_);
   CHECK(!fixup_query_mem_desc.didOutputColumnar());
-  CHECK(fixup_query_mem_desc.hasKeylessHash());
-  CHECK_GE(init_agg_values_.size(), targets_.size());
+  if (query_mem_desc_.getQueryDescriptionType() ==
+      QueryDescriptionType::GroupByPerfectHash) {
+    CHECK_GE(init_agg_values_.size(), targets_.size());
+  }
 
   // .entry defines constant values used throughout the loop
   auto bb_entry = llvm::BasicBlock::Create(context_, ".entry", init_func_);
@@ -293,7 +318,7 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   const auto thread_idx = ir_builder.CreateCall(func_thread_index, {}, "thread_index");
   const auto func_block_dim = getFunction("get_block_dim");
   const auto block_dim = ir_builder.CreateCall(func_block_dim, {}, "block_dim");
-  const auto row_size_bytes = ll_int(fixup_query_mem_desc.getRowWidth(), context_);
+  const auto row_size_bytes = ll_int(fixup_query_mem_desc.getRowSize(), context_);
   const auto entry_count = ll_int(fixup_query_mem_desc.getEntryCount(), context_);
 
   // declare dynamic shared memory:
@@ -325,38 +350,76 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   // each thread will be responsible for one
   const auto& col_slot_context = fixup_query_mem_desc.getColSlotContext();
   size_t init_agg_idx = 0;
+
+  size_t num_groupby_cols = 0;
+  if (!fixup_query_mem_desc.hasKeylessHash()) {
+    num_groupby_cols = fixup_query_mem_desc.getGroupbyColCount();
+  }
+  const auto key_size = fixup_query_mem_desc.getEffectiveKeyWidth();
+  for (size_t key_logical_idx = 0; key_logical_idx < num_groupby_cols;
+       ++key_logical_idx) {
+    auto casted_dest_key_address = codegen_smem_dest_key_ptr(
+        context_, ir_builder, key_size, dest_byte_stream, byte_offset_ll);
+    llvm::Value* init_value_ll = nullptr;
+    if (key_size == sizeof(int32_t)) {
+      init_value_ll = ll_int(static_cast<int32_t>(EMPTY_KEY_32), context_);
+    } else if (key_size == sizeof(int64_t)) {
+      init_value_ll = ll_int(static_cast<int64_t>(EMPTY_KEY_64), context_);
+    } else {
+      UNREACHABLE() << "Invalid key size encountered: " << std::to_string(key_size);
+    }
+    CHECK(init_value_ll);
+    ir_builder.CreateStore(init_value_ll, casted_dest_key_address);
+
+    byte_offset_ll = ir_builder.CreateAdd(
+        byte_offset_ll, ll_int(static_cast<size_t>(key_size), context_));
+  }
+  
+  /* we need to align the slots to 8 bytes nevertless the size of the key */
+  byte_offset_ll =
+      ir_builder.CreateAdd(byte_offset_ll, ll_int(static_cast<size_t>(7), context_), "");
+  byte_offset_ll = ir_builder.CreateAnd(
+      byte_offset_ll, ll_int(static_cast<int64_t>(~7ULL), context_), "");
   for (size_t target_logical_idx = 0; target_logical_idx < targets_.size();
        ++target_logical_idx) {
     const auto& target_info = targets_[target_logical_idx];
     const auto& slots_for_target = col_slot_context.getSlotsForCol(target_logical_idx);
+
     for (size_t slot_idx = slots_for_target.front(); slot_idx <= slots_for_target.back();
          slot_idx++) {
       const auto slot_size = fixup_query_mem_desc.getPaddedSlotWidthBytes(slot_idx);
-      auto casted_dest_slot_address = codegen_smem_dest_slot_ptr(context_,
-                                                                 fixup_query_mem_desc,
-                                                                 ir_builder,
-                                                                 slot_idx,
-                                                                 target_info,
-                                                                 dest_byte_stream,
-                                                                 byte_offset_ll);
-      llvm::Value* init_value_ll = nullptr;
-      if (slot_size == sizeof(int32_t)) {
-        init_value_ll =
-            ll_int(static_cast<int32_t>(init_agg_values_[init_agg_idx++]), context_);
-      } else if (slot_size == sizeof(int64_t)) {
-        init_value_ll =
-            ll_int(static_cast<int64_t>(init_agg_values_[init_agg_idx++]), context_);
-      } else {
-        UNREACHABLE() << "Invalid slot size encountered.";
-      }
-      CHECK(init_value_ll);
-      ir_builder.CreateStore(init_value_ll, casted_dest_slot_address);
+      if (slot_size > 0) {
+        auto casted_dest_slot_address = codegen_smem_dest_slot_ptr(context_,
+                                                                   fixup_query_mem_desc,
+                                                                   ir_builder,
+                                                                   slot_idx,
+                                                                   target_info,
+                                                                   dest_byte_stream,
+                                                                   byte_offset_ll);
+        llvm::Value* init_value_ll = nullptr;
+        if (slot_size == sizeof(int32_t)) {
+          init_value_ll =
+              ll_int(static_cast<int32_t>(init_agg_values_[init_agg_idx++]), context_);
+        } else if (slot_size == sizeof(int64_t)) {
+          init_value_ll =
+              ll_int(static_cast<int64_t>(init_agg_values_[init_agg_idx++]), context_);
+        } else {
+          UNREACHABLE() << "Invalid slot size encountered.";
+        }
+        CHECK(init_value_ll);
+        ir_builder.CreateStore(init_value_ll, casted_dest_slot_address);
 
-      // if not the last loop, we compute the next offset:
-      if (slot_idx != (col_slot_context.getSlotCount() - 1)) {
-        byte_offset_ll = ir_builder.CreateAdd(
-            byte_offset_ll, ll_int(static_cast<size_t>(slot_size), context_));
+        // if not the last loop, we compute the next offset:
+        if (slot_idx != (col_slot_context.getSlotCount() - 1)) {
+          byte_offset_ll = ir_builder.CreateAdd(
+              byte_offset_ll, ll_int(static_cast<size_t>(slot_size), context_));
+        }
       }
+    }
+    if (fixup_query_mem_desc.getQueryDescriptionType() ==
+            QueryDescriptionType::GroupByBaselineHash &&
+        target_logical_idx + 1 == targets_.size()) {
+      break;
     }
   }
 

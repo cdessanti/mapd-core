@@ -691,7 +691,8 @@ void ResultSetReductionJIT::isEmpty(const ReductionCode& reduction_code) const {
 }
 
 void ResultSetReductionJIT::reduceOneEntryNoCollisions(
-    const ReductionCode& reduction_code) const {
+    const ReductionCode& reduction_code,
+    const ExecutorDeviceType device_type) const {
   auto ir_reduce_one_entry = reduction_code.ir_reduce_one_entry.get();
   const auto this_row_ptr = ir_reduce_one_entry->arg(0);
   const auto that_row_ptr = ir_reduce_one_entry->arg(1);
@@ -703,11 +704,37 @@ void ResultSetReductionJIT::reduceOneEntryNoCollisions(
       that_is_empty, ir_reduce_one_entry->addConstant<ConstantInt>(0, Type::Int32), "");
 
   const auto key_bytes = get_key_bytes_rowwise(query_mem_desc_);
-  if (key_bytes) {  // copy the key from right hand side
-    ir_reduce_one_entry->add<MemCpy>(
-        this_row_ptr,
-        that_row_ptr,
-        ir_reduce_one_entry->addConstant<ConstantInt>(key_bytes, Type::Int32));
+
+  if (key_bytes) {
+    if (device_type == ExecutorDeviceType::GPU) {
+      auto cast_size = Type::Int64Ptr;
+      std::string function_name = "copy_group_value_perfect_hash_";
+      const auto num_keys = query_mem_desc_.getKeyCount();
+      const auto num_keys_ll = ir_reduce_one_entry->addConstant<ConstantInt>(
+          *reinterpret_cast<const int32_t*>(may_alias_ptr(&num_keys)), Type::Int32);
+      if (query_mem_desc_.getEffectiveKeyWidth() == sizeof(int64_t)) {
+        cast_size = Type::Int64Ptr;
+        function_name = function_name + "i64";
+      } else if (query_mem_desc_.getEffectiveKeyWidth() == sizeof(int32_t)) {
+        cast_size = Type::Int32Ptr;
+        function_name = function_name + "i32";
+      } else {
+        UNREACHABLE() << " Illegal Key Size " << query_mem_desc_.getEffectiveKeyWidth();
+      }
+      const auto that_row_ptr_casted = ir_reduce_one_entry->add<Cast>(
+          Cast::CastOp::BitCast, that_row_ptr, cast_size, "");
+      const auto this_row_ptr_casted = ir_reduce_one_entry->add<Cast>(
+          Cast::CastOp::BitCast, this_row_ptr, Type::Int64Ptr, "");
+      auto args = std::vector<const Value*>{
+          this_row_ptr_casted, that_row_ptr_casted, num_keys_ll};
+      ir_reduce_one_entry->add<Call>(function_name, args, "");
+    } else if (device_type == ExecutorDeviceType::CPU) {
+      // copy_group_value_perfect_hash work also on CPU but let's stay with the
+      ir_reduce_one_entry->add<MemCpy>(
+          this_row_ptr,
+          that_row_ptr,
+          ir_reduce_one_entry->addConstant<ConstantInt>(key_bytes, Type::Int32));
+    }
   }
 
   const auto key_bytes_with_padding = align_to_int64(key_bytes);
@@ -898,6 +925,74 @@ void ResultSetReductionJIT::reduceOneEntryNoCollisionsIdx(
   ir_reduce_one_entry_idx->add<Ret>(reduce_rc);
 }
 
+void ResultSetReductionJIT::reduceOneEntryBaselineIdx_GPU(
+    const ReductionCode& reduction_code) const {
+  auto ir_reduce_one_entry_idx = reduction_code.ir_reduce_one_entry_idx.get();
+  CHECK(query_mem_desc_.getQueryDescriptionType() ==
+        QueryDescriptionType::GroupByBaselineHash);
+  CHECK(!query_mem_desc_.hasKeylessHash());
+  CHECK(!query_mem_desc_.didOutputColumnar());
+  const auto this_buff = ir_reduce_one_entry_idx->arg(0);
+  const auto that_buff = ir_reduce_one_entry_idx->arg(1);
+  const auto that_entry_idx = ir_reduce_one_entry_idx->arg(2);
+  const auto that_entry_count = ir_reduce_one_entry_idx->arg(3);
+  // not used on GPU smem
+  const auto this_qmd_handle = ir_reduce_one_entry_idx->arg(4);
+  const auto that_qmd_handle = ir_reduce_one_entry_idx->arg(5);
+  const auto serialized_varlen_buffer_arg = ir_reduce_one_entry_idx->arg(6);
+  const auto key_count = query_mem_desc_.getGroupbyColCount();
+  const auto row_bytes = ir_reduce_one_entry_idx->addConstant<ConstantInt>(
+      get_row_bytes(query_mem_desc_), Type::Int32);
+  const auto that_row_off_in_bytes = ir_reduce_one_entry_idx->add<BinaryOperator>(
+      BinaryOperator::BinaryOp::Mul, that_entry_idx, row_bytes, "that_row_off_in_bytes");
+  const auto that_row_ptr = ir_reduce_one_entry_idx->add<GetElementPtr>(
+      that_buff, that_row_off_in_bytes, "that_row_ptr");
+  const auto that_is_empty =
+      ir_reduce_one_entry_idx->add<Call>(reduction_code.ir_is_empty.get(),
+                                         std::vector<const Value*>{that_row_ptr},
+                                         "that_is_empty");
+  ir_reduce_one_entry_idx->add<ReturnEarly>(
+      that_is_empty,
+      ir_reduce_one_entry_idx->addConstant<ConstantInt>(0, Type::Int32),
+      "");
+  const auto key_size = query_mem_desc_.getEffectiveKeyWidth();
+  const auto this_buff_64 = ir_reduce_one_entry_idx->add<Cast>(
+      Cast::CastOp::BitCast, this_buff, Type::Int64Ptr, "this_buff_64");
+  const auto that_row_ptr_64 = ir_reduce_one_entry_idx->add<Cast>(
+      Cast::CastOp::BitCast, that_row_ptr, Type::Int64Ptr, "that_row_ptr_64");
+
+  const auto this_targets_ptr_i64 = ir_reduce_one_entry_idx->add<Call>(
+      "get_group_value_rd",
+      Type::Void,
+      std::vector<const Value*>{
+          this_buff_64,
+          that_entry_count,
+          that_row_ptr_64,  // we should have the key here
+          ir_reduce_one_entry_idx->addConstant<ConstantInt>(
+              key_count, Type::Int32),  // number of keys
+          ir_reduce_one_entry_idx->addConstant<ConstantInt>(key_size, Type::Int32),
+          row_bytes},
+      "this_targets_ptr_i64");
+
+  const auto key_qw_count = get_slot_off_quad(query_mem_desc_);
+  const auto this_targets_ptr = ir_reduce_one_entry_idx->add<Cast>(
+      Cast::CastOp::BitCast, this_targets_ptr_i64, Type::Int8Ptr, "this_targets_ptr");
+
+  const auto key_byte_count = key_qw_count * sizeof(int64_t);
+  const auto key_byte_count_lv =
+      ir_reduce_one_entry_idx->addConstant<ConstantInt>(key_byte_count, Type::Int32);
+  const auto that_targets_ptr = ir_reduce_one_entry_idx->add<GetElementPtr>(
+      that_row_ptr, key_byte_count_lv, "that_targets_ptr");
+  const auto reduce_rc = ir_reduce_one_entry_idx->add<Call>(
+      reduction_code.ir_reduce_one_entry.get(),
+      std::vector<const Value*>{this_targets_ptr,
+                                that_targets_ptr,
+                                this_qmd_handle,
+                                that_qmd_handle,
+                                serialized_varlen_buffer_arg},
+      "");
+  ir_reduce_one_entry_idx->add<Ret>(reduce_rc);
+}
 void ResultSetReductionJIT::reduceOneEntryBaselineIdx(
     const ReductionCode& reduction_code) const {
   auto ir_reduce_one_entry_idx = reduction_code.ir_reduce_one_entry_idx.get();
@@ -1334,10 +1429,26 @@ std::string ResultSetReductionJIT::cacheKey() const {
 ReductionCode GpuReductionHelperJIT::codegen() const {
   const auto hash_type = query_mem_desc_.getQueryDescriptionType();
   auto reduction_code = setup_functions_ir(hash_type);
-  CHECK(hash_type == QueryDescriptionType::GroupByPerfectHash);
+  CHECK(hash_type == QueryDescriptionType::GroupByPerfectHash ||
+        hash_type == QueryDescriptionType::GroupByBaselineHash);
   isEmpty(reduction_code);
-  reduceOneEntryNoCollisions(reduction_code);
-  reduceOneEntryNoCollisionsIdx(reduction_code);
+  switch (query_mem_desc_.getQueryDescriptionType()) {
+    case QueryDescriptionType::GroupByPerfectHash:
+    case QueryDescriptionType::NonGroupedAggregate: {
+      reduceOneEntryNoCollisions(reduction_code, ExecutorDeviceType::GPU);
+      reduceOneEntryNoCollisionsIdx(reduction_code);
+      break;
+    }
+    case QueryDescriptionType::GroupByBaselineHash: {
+      reduceOneEntryBaseline(reduction_code);
+      reduceOneEntryBaselineIdx_GPU(reduction_code);
+
+      break;
+    }
+    default: {
+      LOG(FATAL) << "Unexpected query description type";
+    }
+  }
   reduceLoop(reduction_code);
   auto executor = Executor::getExecutor(executor_id_);
   auto cgen_state_ = std::unique_ptr<CgenState>(new CgenState({}, false, executor.get()));
@@ -1370,5 +1481,32 @@ ReductionCode GpuReductionHelperJIT::codegen() const {
       reduction_code.ir_reduce_loop.get(), ir_reduce_loop, reduction_code, f);
   reduction_code.llvm_reduce_loop = ir_reduce_loop;
   reduction_code.cgen_state = nullptr;
+  // TODO can we cache the GPU reduction
+  // void ResultSetReductionJIT::finalizeReductionCode(
+  //   ReductionCode& reduction_code,
+  //   const llvm::Function* ir_is_empty,
+  //   const llvm::Function* ir_reduce_one_entry,
+  //   const llvm::Function* ir_reduce_one_entry_idx,
+  //   const CodeCacheKey& key) const {
+  // CompilationOptions co{
+  //     ExecutorDeviceType::GPU, false, ExecutorOptLevel::Default, false};
+  VLOG(3) << "Reduction Loop GPU:\n"
+          << serialize_llvm_object(reduction_code.llvm_reduce_loop);
+  VLOG(3) << "Reduction Is Empty Func GPU:\n" << serialize_llvm_object(ir_is_empty);
+  VLOG(3) << "Reduction One Entry Func GPU:\n"
+          << serialize_llvm_object(ir_reduce_one_entry);
+  VLOG(3) << "Reduction One Entry Idx Func GPU:\n"
+          << serialize_llvm_object(ir_reduce_one_entry_idx);
+#ifdef NDEBUG
+  LOG(IR) << "Reduction Loop GPU:\n"
+          << serialize_llvm_object(reduction_code.llvm_reduce_loop);
+  LOG(IR) << "Reduction Is Empty Func GPU:\n" << serialize_llvm_object(ir_is_empty);
+  LOG(IR) << "Reduction One Entry Func GPU:\n"
+          << serialize_llvm_object(ir_reduce_one_entry);
+  LOG(IR) << "Reduction One Entry Idx Func GPU:\n"
+          << serialize_llvm_object(ir_reduce_one_entry_idx);
+#else
+  LOG(IR) << serialize_llvm_object(reduction_code.module);
+#endif
   return reduction_code;
 }

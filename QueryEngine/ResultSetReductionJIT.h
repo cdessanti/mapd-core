@@ -66,11 +66,22 @@ class ResultSetReductionJIT {
 
   // Generate a function which reduces two rows given by their start pointer, for the
   // perfect hash layout.
-  void reduceOneEntryNoCollisions(const ReductionCode& reduction_code) const;
+  void reduceOneEntryNoCollisions(
+      const ReductionCode& reduction_code,
+      const ExecutorDeviceType device_type = ExecutorDeviceType::CPU) const;
 
   // Generate a function which reduces two rows given by the start pointer of the result
   // buffers they are part of and the indices inside those buffers.
   void reduceOneEntryNoCollisionsIdx(const ReductionCode& reduction_code) const;
+
+  // Same as above, for the baseline layout.
+  void reduceOneEntryBaseline(const ReductionCode& reduction_code) const;
+
+  void reduceOneEntryBaselineIdx(const ReductionCode& reduction_code) const;  //,
+
+  // We need to generate a specialized function for the GPU
+  // Because some LLVM conflicts
+  void reduceOneEntryBaselineIdx_GPU(const ReductionCode& reduction_code) const;
 
   // Generate a function for the reduction of an entire result set chunk.
   void reduceLoop(const ReductionCode& reduction_code) const;
@@ -82,13 +93,6 @@ class ResultSetReductionJIT {
   void reduceOneEntryTargetsNoCollisions(Function* ir_reduce_one_entry,
                                          Value* this_targets_start_ptr,
                                          Value* that_targets_start_ptr) const;
-
-  // Same as above, for the baseline layout.
-  void reduceOneEntryBaseline(const ReductionCode& reduction_code) const;
-
-  // Same as above, for the baseline layout.
-  void reduceOneEntryBaselineIdx(const ReductionCode& reduction_code) const;
-
   // Generate reduction code for a single slot.
   void reduceOneSlot(Value* this_ptr1,
                      Value* this_ptr2,
@@ -155,10 +159,7 @@ class GpuReductionHelperJIT : public ResultSetReductionJIT {
                         const size_t executor_id)
       : ResultSetReductionJIT(query_mem_desc, targets, target_init_vals, executor_id)
       , query_mem_desc_(query_mem_desc) {
-    CHECK(query_mem_desc_.getQueryDescriptionType() ==
-          QueryDescriptionType::GroupByPerfectHash);
     CHECK(!query_mem_desc_.didOutputColumnar());
-    CHECK(query_mem_desc_.hasKeylessHash());
   }
   /**
    * generates code for perfect hash group by reduction: the following functions are
