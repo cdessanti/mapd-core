@@ -87,6 +87,7 @@ float g_fraction_code_cache_to_evict = 0.2;
 bool g_enable_smem_weigth{false};
 bool g_enable_smem_opt_sum{false};
 bool g_enable_gpu_insitu_reduction{false};
+bool g_enable_adjust_num_blocks_per_sm{true};
 
 #ifdef ENABLE_GEOS
 
@@ -2764,9 +2765,11 @@ bool has_reduction_function_on_gpu(const QueryMemoryDescriptor* query_mem_desc_p
        g_enable_gpu_insitu_reduction) ||
       (query_mem_desc_ptr->getQueryDescriptionType() ==
            QueryDescriptionType::GroupByPerfectHash &&
-       query_mem_desc_ptr->hasKeylessHash()) ||
-      query_mem_desc_ptr->getQueryDescriptionType() ==
-          QueryDescriptionType::NonGroupedAggregate) {
+       query_mem_desc_ptr->hasKeylessHash() &&
+       query_mem_desc_ptr->isGpuSharedMemoryUsed()) ||
+      (query_mem_desc_ptr->getQueryDescriptionType() ==
+           QueryDescriptionType::NonGroupedAggregate &&
+       query_mem_desc_ptr->isGpuSharedMemoryUsed())) {
     return true;
   }
   return false;
@@ -2777,7 +2780,8 @@ bool is_gpu_shared_mem_supported(const QueryMemoryDescriptor* query_mem_desc_ptr
                                  const CudaMgr_Namespace::CudaMgr* cuda_mgr,
                                  const ExecutorDeviceType device_type,
                                  const unsigned cuda_blocksize,
-                                 const unsigned num_blocks_per_mp) {
+                                 const unsigned num_blocks_per_mp,
+                                 unsigned num_blocks_per_mp_adjusted) {
   if (device_type == ExecutorDeviceType::CPU) {
     return false;
   }
@@ -2839,18 +2843,33 @@ bool is_gpu_shared_mem_supported(const QueryMemoryDescriptor* query_mem_desc_ptr
     // is small enough so that we can fit it in the shared memory and yet expect
     // good occupancy.
     // For now, we allow row-wise layout running reduction on GPU
-    // For keyless perfect hash and running reduction on CPU for baselinehash
+    // For keyless perfect hash and baselinehash all other
 
     if ((query_mem_desc_ptr->hasKeylessHash() || g_enable_smem_grouped_all) &&
         query_mem_desc_ptr->countDistinctDescriptorsLogicallyEmpty() &&
         !query_mem_desc_ptr->useStreamingTopN()) {
-      const size_t shared_memory_threshold_bytes = std::min(
-          g_gpu_smem_threshold == 0 ? SIZE_MAX : g_gpu_smem_threshold,
-          cuda_mgr->getMinSharedMemoryPerBlockForAllDevices() / num_blocks_per_mp);
+      const size_t shared_memory_max_per_mp =
+          std::min(g_gpu_smem_threshold == 0 ? SIZE_MAX : g_gpu_smem_threshold,
+                   cuda_mgr->getMinSharedMemoryPerBlockForAllDevices());
       const auto output_buffer_size =
           query_mem_desc_ptr->getRowSize() * query_mem_desc_ptr->getEntryCount();
-      if (output_buffer_size > shared_memory_threshold_bytes) {
-        return false;
+
+      if (output_buffer_size > (shared_memory_max_per_mp / num_blocks_per_mp) &&
+          num_blocks_per_mp > 1) {
+        // Our blocks don't fit the output buffer
+        // in shared memory. Here we try to find a suitable number of blocks
+        // per MP to fit.
+        if (output_buffer_size <= shared_memory_max_per_mp &&
+            g_enable_adjust_num_blocks_per_sm) {
+          num_blocks_per_mp_adjusted = 1;
+        } else {
+          return false;
+        }
+        while (output_buffer_size <=
+                   shared_memory_max_per_mp / (num_blocks_per_mp_adjusted + 1) &&
+               num_blocks_per_mp_adjusted + 1 <= num_blocks_per_mp) {
+          num_blocks_per_mp_adjusted += 1;
+        }
       }
 
       struct weigth {
@@ -3062,19 +3081,20 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
   }
 
   const bool output_columnar = query_mem_desc->didOutputColumnar();
+  unsigned num_blocks_per_mp_adjusted = 0;
   const bool gpu_shared_mem_optimization =
       is_gpu_shared_mem_supported(query_mem_desc.get(),
                                   ra_exe_unit,
                                   cuda_mgr,
                                   co.device_type,
                                   cuda_mgr ? this->blockSize() : 1,
-                                  cuda_mgr ? this->numBlocksPerMP() : 1);
+                                  cuda_mgr ? this->numBlocksPerMP() : 1,
+                                  num_blocks_per_mp_adjusted);
   if (gpu_shared_mem_optimization) {
     // disable interleaved bins optimization on the GPU
+    // when shared memory is used
     query_mem_desc->setHasInterleavedBinsOnGpu(false);
     query_mem_desc->setSharedMemoryUsed(true);
-    query_mem_desc->setReductionOnGpu(
-        has_reduction_function_on_gpu(query_mem_desc.get()));
     auto const used_shared_mem_size =
         get_shared_memory_size(gpu_shared_mem_optimization, query_mem_desc.get());
     auto const total_shared_mem_size =
@@ -3083,6 +3103,22 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
     VLOG(1) << "GPU shared memory is enabled (query type: "
             << query_mem_desc->queryDescTypeToString() << ", " << used_shared_mem_size
             << " / " << total_shared_mem_size << " bytes are used)";
+    if (num_blocks_per_mp_adjusted != 0 && g_enable_adjust_num_blocks_per_sm) {
+      LOG(DEBUG1) << "Adjusting the number of blocks for SM to fit the shared memory. "
+                     "New block number "
+                  << num_blocks_per_mp_adjusted;
+      this->setGridSize(cuda_mgr->getMinNumMPsForAllDevices() *
+                        num_blocks_per_mp_adjusted);
+    }
+  }
+  if (has_reduction_function_on_gpu(query_mem_desc.get()) &&
+      (gpu_shared_mem_optimization || !query_mem_desc->blocksShareMemory()) &&
+    co.device_type == ExecutorDeviceType::GPU) {
+    // (TODO) Move the init and the reduce out of query_function
+    // to re-enable deinterleaved bins to speed up queries
+    // that didn't fit in shared memory
+    query_mem_desc->setHasInterleavedBinsOnGpu(false);
+    query_mem_desc->setReductionOnGpu(true);
   }
   const GpuSharedMemoryContext gpu_smem_context(
       get_shared_memory_size(gpu_shared_mem_optimization, query_mem_desc.get()),
@@ -3297,6 +3333,10 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
   plan_state_->init_agg_vals_ =
       init_agg_val_vec(ra_exe_unit.target_exprs, ra_exe_unit.quals, *query_mem_desc);
 
+  auto multifrag_query_func = cgen_state_->module_->getFunction(
+      "multifrag_query" + std::string(co.hoist_literals ? "_hoisted_literals" : ""));
+  CHECK(multifrag_query_func);
+
   /*
    * If we have decided to use GPU shared memory (decision is not made here), then
    * we generate proper code for extra components that it needs (buffer initialization and
@@ -3304,7 +3344,11 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
    * into the already compiled query_func (replacing two placeholders, write_back_nop and
    * init_smem_nop). The rest of the code should be as before (row_func, etc.).
    */
-  if (gpu_smem_context.isSharedMemoryUsed() && gpu_smem_context.hasReductionOnGpu()) {
+
+  if ((query_mem_desc->isGpuSharedMemoryUsed() && query_mem_desc->hasReductionOnGpu()) ||
+      (!query_mem_desc->isGpuSharedMemoryUsed() && query_mem_desc->hasReductionOnGpu() &&
+       !query_mem_desc->blocksShareMemory())) {
+        CHECK_EQ(co.device_type, ExecutorDeviceType::GPU);
     if (query_mem_desc->getQueryDescriptionType() ==
             QueryDescriptionType::GroupByPerfectHash ||
         query_mem_desc->getQueryDescriptionType() ==
@@ -3317,19 +3361,16 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
           plan_state_->init_agg_vals_,
           executor_id_);
       gpu_smem_code.codegen();
-      gpu_smem_code.injectFunctionsInto(query_func);
+      gpu_smem_code.injectFunctionsInto(query_func,
+                                        gpu_smem_context.isSharedMemoryUsed());
 
       // helper functions are used for caching purposes later
       cgen_state_->helper_functions_.push_back(gpu_smem_code.getReductionFunction());
       cgen_state_->helper_functions_.push_back(gpu_smem_code.getInitFunction());
-      VLOG(3) << "GPU shared memory optimization IR: \n" << gpu_smem_code.toString();
+      VLOG(3) << "GPU Reduction optimization IR: \n" << gpu_smem_code.toString();
       LOG(IR) << gpu_smem_code.toString();
     }
   }
-
-  auto multifrag_query_func = cgen_state_->module_->getFunction(
-      "multifrag_query" + std::string(co.hoist_literals ? "_hoisted_literals" : ""));
-  CHECK(multifrag_query_func);
 
   if (co.device_type == ExecutorDeviceType::GPU && eo.allow_multifrag) {
     insertErrorCodeChecker(multifrag_query_func,

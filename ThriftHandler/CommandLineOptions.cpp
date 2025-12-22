@@ -985,7 +985,14 @@ void CommandLineOptions::fillDeveloperOptions() {
                      po::value<bool>(&g_enable_gpu_insitu_reduction)
                          ->default_value(g_enable_gpu_insitu_reduction)
                          ->implicit_value(true),
-                     "Enable the reduction of shared memory keyed perfect and baseline hash on local GPU.");
+                     "Enable the reduction of perfect hash and baseline hash on local GPU "
+                     "when multiple buffers per GPU are allocated.");
+  desc.add_options()("enable-adjust-num-blocks-per-sm",
+                     po::value<bool>(&g_enable_adjust_num_blocks_per_sm)
+                         ->default_value(g_enable_adjust_num_blocks_per_sm)
+                         ->implicit_value(true),
+                     "Enable the automatic reduction of number of blocks per SM"
+                     " in case the number of blocks is preventing from using shared memory");
   desc.add_options()("enable-direct-columnarization",
                      po::value<bool>(&g_enable_direct_columnarization)
                          ->default_value(g_enable_direct_columnarization)

@@ -103,6 +103,7 @@ Params<NTYPES> make_params(llvm::Module const* const mod, bool const hoist_liter
   params.pushBack(pi32_type, "error_code");
   params.pushBack(pi32_type, "total_matched");
   params.pushBack(ppi64_type, IS_GROUP_BY ? "group_by_buffers" : "out");
+  params.pushBack(ppi64_type, "reduced_buffer");
   params.pushBack(i32_type, "frag_idx");
   if constexpr (IS_GROUP_BY) {
     constexpr llvm::Attribute::AttrKind ReadOnly = llvm::Attribute::ReadOnly;
@@ -119,6 +120,8 @@ Params<NTYPES> make_params(llvm::Module const* const mod, bool const hoist_liter
     params.pushBack(pi64_type, "agg_init_val", NoCapture, ReadOnly);
     params.pushBack(pi64_type, "join_hash_tables", NoCapture, ReadOnly);
     params.pushBack(pi8_type, "row_func_mgr", NoCapture, ReadOnly);
+    params.pushBack(pi32_type, "num_entries", NoCapture);
+    params.pushBack(pi32_type, "buffer_size", NoCapture);
     params.addAttributes(llvm::AttributeList::AttrIndex::FunctionIndex, UWTable);
   } else {
     // For an unknown reason, commit 70ab189189cc0599d973f3f021169a6846298cf5
@@ -136,6 +139,8 @@ Params<NTYPES> make_params(llvm::Module const* const mod, bool const hoist_liter
     params.pushBack(pi64_type, "agg_init_val", NoCapture);
     params.pushBack(pi64_type, "join_hash_tables", NoCapture);
     params.pushBack(pi8_type, "row_func_mgr", NoCapture);
+    params.pushBack(pi32_type, "num_entries", NoCapture);
+    params.pushBack(pi32_type, "buffer_size", NoCapture);
   }
   return params;
 }
@@ -692,12 +697,16 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_group_by_template(
   col_buffer->setName("col_buffer");
   col_buffer->setAlignment(LLVM_ALIGN(8));
 
-  llvm::ConstantInt* shared_mem_bytes_lv =
-      ConstantInt::get(i32_type, gpu_smem_context.getSharedMemorySize());
+  auto const name_arg =
+      !gpu_smem_context.hasReductionOnGpu() ? "buffer_size" : "num_entries";
+  llvm::Value* const entries_size_ptr = get_arg_by_name(query_func_ptr, name_arg);
+  LoadInst* entries_size = new LoadInst(
+      get_pointer_element_type(entries_size_ptr), entries_size_ptr, "", false, bb_entry);
+
   // TODO(Saman): change this further, normal path should not go through this
   llvm::CallInst* result_buffer =
       CallInst::Create(func_init_shared_mem,
-                       std::vector<llvm::Value*>{col_buffer, shared_mem_bytes_lv},
+                       std::vector<llvm::Value*>{col_buffer, entries_size},
                        "result_buffer",
                        bb_entry);
 
@@ -799,13 +808,33 @@ std::tuple<llvm::Function*, llvm::CallInst*> query_group_by_template(
 
   // Block ._crit_edge
   BranchInst::Create(bb_exit, bb_crit_edge);
-
   // Block .exit
-  CallInst::Create(func_write_back,
-                   std::vector<Value*>{col_buffer, result_buffer, shared_mem_bytes_lv},
-                   "",
-                   bb_exit);
-
+  if (gpu_smem_context.hasReductionOnGpu() && !gpu_smem_context.isSharedMemoryUsed() &&
+      device_type == ExecutorDeviceType::GPU) {
+    auto* const reduced_buffers = get_arg_by_name(query_func_ptr, "reduced_buffer");
+    GetElementPtrInst* reduced_buffers_gep =
+        GetElementPtrInst::Create(Ty->getPointerElementType(),
+                                  reduced_buffers,
+                                  ConstantInt::get(i32_type, 0),
+                                  "",
+                                  bb_exit);
+    LoadInst* reduce_buffer = new LoadInst(get_pointer_element_type(reduced_buffers_gep),
+                                           reduced_buffers_gep,
+                                           "",
+                                           false,
+                                           bb_exit);
+    reduce_buffer->setName("reduce_buffer");
+    reduce_buffer->setAlignment(LLVM_ALIGN(8));
+    CallInst::Create(func_write_back,
+                     std::vector<Value*>{reduce_buffer, result_buffer, entries_size},
+                     "",
+                     bb_exit);
+  } else {
+    CallInst::Create(func_write_back,
+                     std::vector<Value*>{col_buffer, result_buffer, entries_size},
+                     "",
+                     bb_exit);
+  }
   ReturnInst::Create(mod->getContext(), bb_exit);
 
   // Resolve Forward References

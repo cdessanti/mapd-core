@@ -165,7 +165,9 @@ ResultSetPtr QueryExecutionContext::getRowSet(
   auto timer = DEBUG_TIMER(__func__);
   std::vector<std::pair<ResultSetPtr, std::vector<size_t>>> results_per_sm;
   CHECK(query_buffers_);
-  const auto group_by_buffers_size = query_buffers_->getNumBuffers();
+  const auto group_by_buffers_size =
+      query_buffers_->getNumBuffers() /
+      (query_mem_desc.hasReductionOnGpu() ? executor_->gridSize() : 1);
   if (device_type_ == ExecutorDeviceType::CPU) {
     const size_t expected_num_buffers = query_mem_desc.hasVarlenOutput() ? 2 : 1;
     CHECK_EQ(expected_num_buffers, group_by_buffers_size);
@@ -326,6 +328,10 @@ std::vector<int64_t*> QueryExecutionContext::launchGpuCode(
     kernel_params_log.ptrs[int(KP::GROUPBY_BUF)] = gpu_group_by_buffers.ptrs;
     kernel_params_log.values[int(KP::GROUPBY_BUF)] =
         KernelParamsLog::NamedSize{"EntryCount", gpu_group_by_buffers.entry_count};
+    kernel_params[int(KP::REDUCED_BUF)] = gpu_group_by_buffers.reduce_buffer_ptr;
+    kernel_params_log.ptrs[int(KP::REDUCED_BUF)] = gpu_group_by_buffers.reduce_buffer_ptr;
+    kernel_params_log.values[int(KP::REDUCED_BUF)] =
+        KernelParamsLog::NamedSize{"EntryCount", 1};
     std::vector<void*> param_ptrs;
     for (auto& param : kernel_params) {
       param_ptrs.push_back(&param);
@@ -492,6 +498,7 @@ std::vector<int64_t*> QueryExecutionContext::launchGpuCode(
     kernel_params_log.ptrs[int(KP::GROUPBY_BUF)] = out_vec_dev_ptr;
     kernel_params_log.values[int(KP::GROUPBY_BUF)] =
         KernelParamsLog::NamedSize{"AggColCount", agg_col_count};
+    kernel_params[int(KP::REDUCED_BUF)] = out_vec_dev_ptr;
     std::vector<void*> param_ptrs;
     for (auto& param : kernel_params) {
       param_ptrs.push_back(&param);
@@ -683,11 +690,14 @@ std::vector<int64_t*> QueryExecutionContext::launchCpuCode(
       is_group_by ? cmpt_val_buff.data() : init_agg_vals.data();
   int64_t** const out =
       is_group_by ? query_buffers_->getGroupByBuffersPtr() : out_vec.data();
+  auto num_entries = 0u;
+  auto buffer_size = 0u;
   if (hoist_literals) {
     native_code->call(
         error_code,           // int32_t*,         // error_code
         &total_matched_init,  // int32_t*,         // total_matched
         out,                  // int64_t**,        // out
+        nullptr,              // int64_t**,        // out_reduced
         &num_fragments,       // const uint32_t*,  // num_fragments
         &num_tables,          // const uint32_t*,  // num_tables
         &start_rowid,         // const uint32_t*,  // start_rowid aka row_index_resume
@@ -699,12 +709,15 @@ std::vector<int64_t*> QueryExecutionContext::launchCpuCode(
         &scan_limit,                    // const int32_t*,   // max_matched
         init_agg_value,                 // const int64_t*,   // init_agg_value
         join_hash_tables_ptr,           // const int64_t*,   // join_hash_tables_ptr
-        row_func_mgr_ptr);              // const int8_t*);   // row_func_mgr
+        row_func_mgr_ptr,               // const int8_t*,    // row_func_mgr
+        &num_entries,                   // const int32_t*,   // num_entries
+        &buffer_size);                  // const int32_t*);  // buffer_size
   } else {
     native_code->call(
         error_code,           // int32_t*,         // error_code
         &total_matched_init,  // int32_t*,         // total_matched
         out,                  // int64_t**,        // out
+        nullptr,              // int64_t**,        // out_reduced
         &num_fragments,       // const uint32_t*,  // num_fragments
         &num_tables,          // const uint32_t*,  // num_tables
         &start_rowid,         // const uint32_t*,  // start_rowid aka row_index_resume
@@ -715,7 +728,9 @@ std::vector<int64_t*> QueryExecutionContext::launchCpuCode(
         &scan_limit,                    // const int32_t*,   // max_matched
         init_agg_value,                 // const int64_t*,   // init_agg_value
         join_hash_tables_ptr,           // const int64_t*,   // join_hash_tables_ptr
-        row_func_mgr_ptr);              // const int8_t*);   // row_func_mgr
+        row_func_mgr_ptr,               // const int8_t*,    // row_func_mgr
+        &num_entries,                   // const int32_t*,   // num_entries
+        &buffer_size);                  // const int32_t*);  // buffer_size
   }
 
   if (ra_exe_unit.estimator) {
@@ -1000,6 +1015,7 @@ QueryExecutionContext::prepareKernelParams(
   param_sizes[int(KP::ERROR_CODE)] = sizeofVector(error_codes);
   param_sizes[int(KP::TOTAL_MATCHED)] = sizeof(uint32_t);
   param_sizes[int(KP::GROUPBY_BUF)] = 0u;
+  param_sizes[int(KP::REDUCED_BUF)] = 0u;
   param_sizes[int(KP::NUM_FRAGMENTS)] = sizeof(uint32_t);
   param_sizes[int(KP::NUM_TABLES)] = sizeof(num_tables);
   param_sizes[int(KP::ROW_INDEX_RESUME)] = sizeof(uint32_t);
@@ -1015,6 +1031,8 @@ QueryExecutionContext::prepareKernelParams(
   param_sizes[int(KP::INIT_AGG_VALS)] = sizeofInitAggVals(is_group_by, init_agg_vals);
   param_sizes[int(KP::JOIN_HASH_TABLES)] = sizeofJoinHashTables(join_hash_tables);
   param_sizes[int(KP::ROW_FUNC_MGR)] = 0u;
+  param_sizes[int(KP::NUM_ENTRIES)] = sizeof(uint32_t);
+  param_sizes[int(KP::BUFFER_SIZE)] = sizeof(uint32_t);
 
   // 8-byte align all param_sizes and accumulate
   std::transform(param_sizes.begin(),
@@ -1047,6 +1065,7 @@ QueryExecutionContext::prepareKernelParams(
 
   params[int(KP::GROUPBY_BUF)] = nullptr;
   params_log.ptrs[int(KP::GROUPBY_BUF)] = nullptr;
+  params[int(KP::REDUCED_BUF)] = nullptr;
 
   copyValueToDevice(params[int(KP::NUM_FRAGMENTS)],
                     uint32_t(col_buffers.size()),
@@ -1105,6 +1124,18 @@ QueryExecutionContext::prepareKernelParams(
   // to avoid diverging from CPU generated code
   params[int(KP::ROW_FUNC_MGR)] = nullptr;
   params_log.ptrs[int(KP::ROW_FUNC_MGR)] = nullptr;
+
+  copyValueToDevice(params[int(KP::NUM_ENTRIES)],
+                    uint32_t(query_mem_desc_.getEntryCount()),
+                    "params[NUM_ROWS]");
+  params_log.values[int(KP::NUM_ENTRIES)] =
+      KPL::NamedSize{"Num Entries", query_mem_desc_.getEntryCount()};
+
+  copyValueToDevice(params[int(KP::BUFFER_SIZE)],
+                    uint32_t(query_mem_desc_.getBufferSizeBytes(ExecutorDeviceType::GPU)),
+                    "params[BUFFER_SIZE]");
+  params_log.values[int(KP::BUFFER_SIZE)] =
+      KPL::NamedSize{"Group-by Buffer Size", query_buffers_->getGroupByBuffersSize()};
 
   return std::make_pair(std::move(params), std::move(params_log));
 }

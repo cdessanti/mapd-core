@@ -101,8 +101,7 @@ void GpuSharedMemCodeBuilder::codegenReduction() {
   auto src_buffer_ptr = &*arg_it;
   src_buffer_ptr->setName("src_buffer_ptr");
   arg_it++;
-  auto buffer_size = &*arg_it;
-  buffer_size->setName("buffer_size");
+  const auto num_entries = &*arg_it;
 
   auto bb_entry = llvm::BasicBlock::Create(context_, ".entry", reduction_func_);
   auto bb_preheader =
@@ -110,6 +109,12 @@ void GpuSharedMemCodeBuilder::codegenReduction() {
   auto bb_forbody = llvm::BasicBlock::Create(context_, ".forbody", reduction_func_);
   auto bb_exit = llvm::BasicBlock::Create(context_, ".exit", reduction_func_);
   llvm::IRBuilder<> ir_builder(bb_entry);
+  const auto entry_count =
+      ir_builder.CreateIntCast(num_entries, llvm::Type::getInt64Ty(context_), true);
+  const auto entry_count_i32 =
+      ir_builder.CreateIntCast(num_entries, llvm::Type::getInt32Ty(context_), true);
+
+
 
   // synchronize all threads within a threadblock:
   const auto sync_threadblock = getFunction("sync_threadblock");
@@ -125,9 +130,6 @@ void GpuSharedMemCodeBuilder::codegenReduction() {
   const auto dest_byte_stream = ir_builder.CreatePointerCast(
       dest_buffer_ptr, llvm::Type::getInt8PtrTy(context_, 0), "dest_byte_stream");
   // branching out of out of bound:
-  const auto entry_count = ll_int(query_mem_desc_.getEntryCount(), context_);
-  const auto entry_count_i32 =
-      ll_int(static_cast<int32_t>(query_mem_desc_.getEntryCount()), context_);
   const auto is_thread_inbound =
       ir_builder.CreateICmpSLT(thread_idx, entry_count, "is_thread_inbound");
   ir_builder.CreateCondBr(is_thread_inbound, bb_preheader, bb_exit);
@@ -231,20 +233,22 @@ llvm::Value* codegen_smem_dest_slot_ptr(llvm::LLVMContext& context,
                                         const size_t slot_idx,
                                         const TargetInfo& target_info,
                                         llvm::Value* dest_byte_stream,
-                                        llvm::Value* byte_offset) {
+                                        llvm::Value* byte_offset,
+                                        const int address_space) {
   const auto sql_type = get_compact_type(target_info);
   const auto slot_bytes = query_mem_desc.getPaddedSlotWidthBytes(slot_idx);
 
-  auto ptr_type = [&context](const size_t slot_bytes, const SQLTypeInfo& sql_type) {
+  auto ptr_type = [&context, address_space](const size_t slot_bytes,
+                                            const SQLTypeInfo& sql_type) {
     VLOG(1) << "Slot bytes " << slot_bytes;
     if (slot_bytes == sizeof(int32_t)) {
-      return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+      return llvm::Type::getInt32PtrTy(context, address_space);
     } else {
       CHECK(slot_bytes == sizeof(int64_t));
-      return llvm::Type::getInt64PtrTy(context, /*address_space=*/3);
+      return llvm::Type::getInt64PtrTy(context, address_space);
     }
     UNREACHABLE() << "Invalid slot size encountered: " << std::to_string(slot_bytes);
-    return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+    return llvm::Type::getInt32PtrTy(context, address_space);
   };
 
   const auto casted_dest_slot_address = ir_builder.CreatePointerCast(
@@ -260,16 +264,17 @@ llvm::Value* codegen_smem_dest_key_ptr(llvm::LLVMContext& context,
                                        llvm::IRBuilder<>& ir_builder,
                                        const size_t key_bytes,
                                        llvm::Value* dest_byte_stream,
-                                       llvm::Value* byte_offset) {
-  auto ptr_type = [&context](const size_t key_bytes) {
+                                       llvm::Value* byte_offset,
+                                       const int address_space) {
+  auto ptr_type = [&context, address_space](const size_t key_bytes) {
     if (key_bytes == sizeof(int32_t)) {
-      return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+      return llvm::Type::getInt32PtrTy(context, address_space);
     } else {
       CHECK(key_bytes == sizeof(int64_t));
-      return llvm::Type::getInt64PtrTy(context, /*address_space=*/3);
+      return llvm::Type::getInt64PtrTy(context, address_space);
     }
     UNREACHABLE() << "Invalid key size encountered: " << std::to_string(key_bytes);
-    return llvm::Type::getInt32PtrTy(context, /*address_space=*/3);
+    return llvm::Type::getInt32PtrTy(context, address_space);
   };
 
   const auto casted_dest_key_address = ir_builder.CreatePointerCast(
@@ -319,15 +324,24 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   const auto func_block_dim = getFunction("get_block_dim");
   const auto block_dim = ir_builder.CreateCall(func_block_dim, {}, "block_dim");
   const auto row_size_bytes = ll_int(fixup_query_mem_desc.getRowSize(), context_);
-  const auto entry_count = ll_int(fixup_query_mem_desc.getEntryCount(), context_);
 
-  // declare dynamic shared memory:
+  llvm::Value* dest_byte_stream;
   const auto declare_smem_func = getFunction("declare_dynamic_shared_memory");
   const auto shared_mem_buffer =
       ir_builder.CreateCall(declare_smem_func, {}, "shared_mem_buffer");
-  const auto dest_byte_stream = ir_builder.CreatePointerCast(
-      shared_mem_buffer, llvm::Type::getInt8PtrTy(context_), "dest_byte_stream");
-
+  auto arg_it = init_func_->arg_begin();
+  auto dest_buffer_ptr = &*arg_it;
+  arg_it++;
+  const auto num_entries = &*arg_it;
+  const auto entry_count =
+      ir_builder.CreateIntCast(num_entries, llvm::Type::getInt64Ty(context_), true);
+  if (query_mem_desc_.isGpuSharedMemoryUsed()) {
+    dest_byte_stream = ir_builder.CreatePointerCast(
+        shared_mem_buffer, llvm::Type::getInt8PtrTy(context_), "dest_byte_stream");
+  } else {
+    dest_byte_stream = ir_builder.CreatePointerCast(
+        dest_buffer_ptr, llvm::Type::getInt8PtrTy(context_), "dest_byte_stream");
+  }
   // check whether the current thread is valid w.r.t the query's entry count
   const auto is_thread_inbound =
       ir_builder.CreateICmpSLT(thread_idx, entry_count, "is_thread_inbound");
@@ -358,8 +372,13 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   const auto key_size = fixup_query_mem_desc.getEffectiveKeyWidth();
   for (size_t key_logical_idx = 0; key_logical_idx < num_groupby_cols;
        ++key_logical_idx) {
-    auto casted_dest_key_address = codegen_smem_dest_key_ptr(
-        context_, ir_builder, key_size, dest_byte_stream, byte_offset_ll);
+    auto casted_dest_key_address =
+        codegen_smem_dest_key_ptr(context_,
+                                  ir_builder,
+                                  key_size,
+                                  dest_byte_stream,
+                                  byte_offset_ll,
+                                  (query_mem_desc_.isGpuSharedMemoryUsed()) ? 3 : 1);
     llvm::Value* init_value_ll = nullptr;
     if (key_size == sizeof(int32_t)) {
       init_value_ll = ll_int(static_cast<int32_t>(EMPTY_KEY_32), context_);
@@ -374,12 +393,14 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
     byte_offset_ll = ir_builder.CreateAdd(
         byte_offset_ll, ll_int(static_cast<size_t>(key_size), context_));
   }
-  
+
   /* we need to align the slots to 8 bytes nevertless the size of the key */
-  byte_offset_ll =
-      ir_builder.CreateAdd(byte_offset_ll, ll_int(static_cast<size_t>(7), context_), "");
-  byte_offset_ll = ir_builder.CreateAnd(
-      byte_offset_ll, ll_int(static_cast<int64_t>(~7ULL), context_), "");
+  if (!fixup_query_mem_desc.hasKeylessHash()) {
+    byte_offset_ll = ir_builder.CreateAdd(
+        byte_offset_ll, ll_int(static_cast<size_t>(7), context_), "");
+    byte_offset_ll = ir_builder.CreateAnd(
+        byte_offset_ll, ll_int(static_cast<int64_t>(~7ULL), context_), "");
+  }
   for (size_t target_logical_idx = 0; target_logical_idx < targets_.size();
        ++target_logical_idx) {
     const auto& target_info = targets_[target_logical_idx];
@@ -389,13 +410,15 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
          slot_idx++) {
       const auto slot_size = fixup_query_mem_desc.getPaddedSlotWidthBytes(slot_idx);
       if (slot_size > 0) {
-        auto casted_dest_slot_address = codegen_smem_dest_slot_ptr(context_,
-                                                                   fixup_query_mem_desc,
-                                                                   ir_builder,
-                                                                   slot_idx,
-                                                                   target_info,
-                                                                   dest_byte_stream,
-                                                                   byte_offset_ll);
+        auto casted_dest_slot_address =
+            codegen_smem_dest_slot_ptr(context_,
+                                       fixup_query_mem_desc,
+                                       ir_builder,
+                                       slot_idx,
+                                       target_info,
+                                       dest_byte_stream,
+                                       byte_offset_ll,
+                                       (query_mem_desc_.isGpuSharedMemoryUsed()) ? 3 : 1);
         llvm::Value* init_value_ll = nullptr;
         if (slot_size == sizeof(int32_t)) {
           init_value_ll =
@@ -432,7 +455,11 @@ void GpuSharedMemCodeBuilder::codegenInitialization() {
   // synchronize all threads within a threadblock:
   const auto sync_threadblock = getFunction("sync_threadblock");
   ir_builder.CreateCall(sync_threadblock, {});
-  ir_builder.CreateRet(shared_mem_buffer);
+  if (query_mem_desc_.isGpuSharedMemoryUsed()) {
+    ir_builder.CreateRet(shared_mem_buffer);
+  } else {
+    ir_builder.CreateRet(dest_buffer_ptr);
+  }
 }
 
 llvm::Function* GpuSharedMemCodeBuilder::createReductionFunction() const {
@@ -499,10 +526,15 @@ void replace_called_function_with(llvm::Function* main_func,
 
 }  // namespace
 
-void GpuSharedMemCodeBuilder::injectFunctionsInto(llvm::Function* query_func) {
+void GpuSharedMemCodeBuilder::injectFunctionsInto(llvm::Function* query_func,
+                                                  bool init_smem_needed) {
   CHECK(reduction_func_);
   CHECK(init_func_);
-  replace_called_function_with(query_func, "init_shared_mem", init_func_);
+  if (init_smem_needed) {
+    replace_called_function_with(query_func, "init_shared_mem", init_func_);
+  } else {
+    replace_called_function_with(query_func, "init_shared_mem_nop", init_func_);
+  }
   replace_called_function_with(query_func, "write_back_nop", reduction_func_);
 }
 

@@ -1229,12 +1229,13 @@ GpuGroupByBuffers QueryMemoryInitializer::createAndInitializeGroupByBufferGpu(
         query_mem_desc.interleavedBins(ExecutorDeviceType::GPU) ? warp_size : 1;
     const auto num_group_by_buffers =
         getGroupByBuffersSize() - (query_mem_desc.hasVarlenOutput() ? 1 : 0);
-    VLOG(1) << "Initializing " << num_group_by_buffers / step << " group by buffers ";
+    const auto num_gpu_buffers = num_group_by_buffers / step + (( query_mem_desc.hasReductionOnGpu() && !query_mem_desc.blocksShareMemory()) ? 1 : 0) ;
+    VLOG(1) << "Initializing " << num_gpu_buffers << " group by buffers ";
     if (!output_columnar && !query_mem_desc.hasVarlenOutput()) {
       init_group_by_buffer_on_device(
           reinterpret_cast<int64_t*>(group_by_dev_buffer),
           reinterpret_cast<const int64_t*>(init_agg_vals_dev_ptr),
-          dev_group_by_buffers.entry_count * (num_group_by_buffers / step),
+          dev_group_by_buffers.entry_count * num_gpu_buffers,
           query_mem_desc.getGroupbyColCount(),
           query_mem_desc.getEffectiveKeyWidth(),
           query_mem_desc.getRowSize() / sizeof(int64_t),
@@ -1276,7 +1277,7 @@ GpuGroupByBuffers QueryMemoryInitializer::createAndInitializeGroupByBufferGpu(
         group_by_dev_buffer += groups_buffer_size;
       }
     }
-    VLOG(1) << "Initialized " << num_group_by_buffers / step << " group by buffers ";
+    VLOG(1) << "Initialized " << num_gpu_buffers << " group by buffers ";
   }
   return dev_group_by_buffers;
 #else

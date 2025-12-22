@@ -87,6 +87,8 @@ GpuGroupByBuffers create_dev_group_by_buffers(
   }
   CHECK(device_allocator);
 
+  const bool needs_reduction_buffer =
+      query_mem_desc.hasReductionOnGpu() && !query_mem_desc.blocksShareMemory();
   size_t groups_buffer_size{0};
   int8_t* group_by_dev_buffers_mem{nullptr};
   size_t mem_size{0};
@@ -108,7 +110,9 @@ GpuGroupByBuffers create_dev_group_by_buffers(
           query_mem_desc.getBufferSizeBytes(ExecutorDeviceType::GPU, entry_count);
       mem_size = coalesced_size(query_mem_desc,
                                 groups_buffer_size,
-                                query_mem_desc.blocksShareMemory() ? 1 : grid_size_x);
+                                query_mem_desc.blocksShareMemory() ? 1
+                                : needs_reduction_buffer           ? grid_size_x + 1
+                                                                   : grid_size_x);
       // TODO(adb): render allocator support
       VLOG(1) << "Prepare query output buffer on GPU, bump_allocator: on, dispatch_mode: "
                  "KernelPerFragment, entry_count: "
@@ -160,7 +164,9 @@ GpuGroupByBuffers create_dev_group_by_buffers(
         query_mem_desc.getBufferSizeBytes(ExecutorDeviceType::GPU, entry_count);
     mem_size = coalesced_size(query_mem_desc,
                               groups_buffer_size,
-                              query_mem_desc.blocksShareMemory() ? 1 : grid_size_x);
+                              query_mem_desc.blocksShareMemory() ? 1
+                              : needs_reduction_buffer           ? grid_size_x + 1
+                                                                 : grid_size_x);
     const size_t prepended_buff_size{
         prepend_index_buffer ? align_to_int64(entry_count * sizeof(int32_t)) : 0};
 
@@ -184,6 +190,7 @@ GpuGroupByBuffers create_dev_group_by_buffers(
   CHECK(query_mem_desc.threadsShareMemory());
   const size_t step{block_size_x};
 
+  // TODO manage this kind of initialization when the reducing on GPU globabl memory
   if (!insitu_allocator && (always_init_group_by_on_host ||
                             !query_mem_desc.lazyInitGroups(ExecutorDeviceType::GPU))) {
     std::vector<int8_t> buff_to_gpu(mem_size);
@@ -203,18 +210,23 @@ GpuGroupByBuffers create_dev_group_by_buffers(
   auto group_by_dev_buffer = group_by_dev_buffers_mem;
 
   const size_t num_ptrs =
-      (block_size_x * grid_size_x) + (has_varlen_output ? size_t(1) : size_t(0));
-
+      (block_size_x * grid_size_x + (has_varlen_output ? size_t(1) : size_t(0)) +
+       (needs_reduction_buffer ? size_t(1) : size_t(0)));
   std::vector<int8_t*> group_by_dev_buffers(num_ptrs);
 
   const size_t start_index = has_varlen_output ? 1 : 0;
-  for (size_t i = start_index; i < num_ptrs; i += step) {
+  for (size_t i = start_index; i < num_ptrs - (needs_reduction_buffer ? 1 : 0);
+       i += step) {
     for (size_t j = 0; j < step; ++j) {
       group_by_dev_buffers[i + j] = group_by_dev_buffer;
     }
     if (!query_mem_desc.blocksShareMemory()) {
       group_by_dev_buffer += groups_buffer_size;
     }
+  }
+
+  if (needs_reduction_buffer) {
+    group_by_dev_buffers[num_ptrs - 1] = group_by_dev_buffer;
   }
 
   int8_t* varlen_output_buffer{nullptr};
@@ -239,7 +251,11 @@ GpuGroupByBuffers create_dev_group_by_buffers(
                                  dev_ptr_buf_size,
                                  "Group-by buffer");
 
-  return {group_by_dev_ptr, group_by_dev_buffers_mem, entry_count, varlen_output_buffer};
+  return {group_by_dev_ptr,
+          group_by_dev_buffers_mem,
+          entry_count,
+          varlen_output_buffer,
+          group_by_dev_ptr + (num_ptrs - 1) * sizeof(CUdeviceptr)};
 }
 
 void copy_group_by_buffers_from_gpu(DeviceAllocator& device_allocator,
@@ -257,14 +273,21 @@ void copy_group_by_buffers_from_gpu(DeviceAllocator& device_allocator,
   }
   const size_t first_group_buffer_idx = has_varlen_output ? 1 : 0;
 
-  const unsigned block_buffer_count{query_mem_desc.blocksShareMemory() ? 1 : grid_size_x};
+  const unsigned block_buffer_count{query_mem_desc.blocksShareMemory() ||
+                                            query_mem_desc.hasReductionOnGpu()
+                                        ? 1
+                                        : grid_size_x};
   if (block_buffer_count == 1 && !prepend_index_buffer) {
     CHECK_EQ(coalesced_size(query_mem_desc, groups_buffer_size, block_buffer_count),
              groups_buffer_size);
-    device_allocator.copyFromDevice(group_by_buffers[first_group_buffer_idx],
-                                    group_by_dev_buffers_mem,
-                                    groups_buffer_size,
-                                    "Group-by buffer");
+    device_allocator.copyFromDevice(
+        group_by_buffers[first_group_buffer_idx],
+        group_by_dev_buffers_mem +
+            ((query_mem_desc.hasReductionOnGpu() && !query_mem_desc.blocksShareMemory())
+                 ? grid_size_x * groups_buffer_size
+                 : 0),
+        groups_buffer_size,
+        "Group-by buffer");
     return;
   }
   const size_t index_buffer_sz{
@@ -275,7 +298,7 @@ void copy_group_by_buffers_from_gpu(DeviceAllocator& device_allocator,
   device_allocator.copyFromDevice(&buff_from_gpu[0],
                                   group_by_dev_buffers_mem - index_buffer_sz,
                                   buff_from_gpu.size(),
-                                  "Group-by buffer");
+                                  "Group-by multiple buffer with prepend index");
   auto buff_from_gpu_ptr = &buff_from_gpu[0];
   for (size_t i = 0; i < block_buffer_count; ++i) {
     const size_t buffer_idx = (i * block_size_x) + first_group_buffer_idx;

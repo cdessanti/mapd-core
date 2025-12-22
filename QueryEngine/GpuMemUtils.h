@@ -50,6 +50,9 @@ struct GpuGroupByBuffers {
   int8_t* data;  // ptr to data allocation
   size_t entry_count;
   int8_t* varlen_output_buffer;
+  int8_t* reduce_buffer_ptr;  // pointer to the output containing the buffer used to reduce
+                              // the results in gpu. it's located in the array containing
+                              // output pointer for the thread
 };
 
 class QueryMemoryDescriptor;

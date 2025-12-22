@@ -75,7 +75,8 @@ class ResultSetReductionJIT {
   void reduceOneEntryNoCollisionsIdx(const ReductionCode& reduction_code) const;
 
   // Same as above, for the baseline layout.
-  void reduceOneEntryBaseline(const ReductionCode& reduction_code) const;
+  void reduceOneEntryBaseline(const ReductionCode& reduction_code,
+                              ExecutorDeviceType device_type = ExecutorDeviceType::CPU) const;
 
   void reduceOneEntryBaselineIdx(const ReductionCode& reduction_code) const;  //,
 

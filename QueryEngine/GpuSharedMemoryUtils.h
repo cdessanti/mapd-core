@@ -59,7 +59,7 @@ class GpuSharedMemCodeBuilder {
    * query function and replaces the previous placeholders, which were inserted in the
    * query template, with these new functions.
    */
-  void injectFunctionsInto(llvm::Function* query_func);
+  void injectFunctionsInto(llvm::Function* query_func, bool init_smem_needed = true);
 
   llvm::Function* getReductionFunction() const { return reduction_func_; }
   llvm::Function* getInitFunction() const { return init_func_; }

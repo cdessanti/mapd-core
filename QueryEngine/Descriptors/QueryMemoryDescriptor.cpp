@@ -28,6 +28,7 @@
 bool g_enable_smem_group_by{true};
 extern bool g_enable_columnar_output;
 extern size_t g_streaming_topn_max;
+extern double g_ndv_groups_estimator_multiplier;
 
 namespace {
 
@@ -1189,7 +1190,7 @@ bool QueryMemoryDescriptor::blocksShareMemory() const {
     // we expect this entry_count will not cause memory contention even
     // all CUDA blocks concurrently access the shared output buffer
     // if not, let's prepare a dedicated output buffer for each CUDA block
-    return many_entries(entry_count_, 0, bucket_, kLargeGroupbyEntryCount);
+    return many_entries(static_cast<size_t>(static_cast<double>(entry_count_)/g_ndv_groups_estimator_multiplier), 0, bucket_, kLargeGroupbyEntryCount);
   }
   if (query_desc_type_ == QueryDescriptionType::GroupByPerfectHash) {
     return many_entries(max_val_, min_val_, bucket_, kLargeGroupbyEntryCount);
@@ -1322,7 +1323,7 @@ std::string QueryMemoryDescriptor::toString() const {
   str += "\tMax Val (perfect hash only): " + std::to_string(max_val_) + "\n";
   str += "\tBucket Val (perfect hash only): " + std::to_string(bucket_) + "\n";
   str += "\tGpu Shared Memory Used: " + ::toString(gpu_shared_memory_used_) + "\n";
-  str += "\tShared Memory Reduction on GPU: " + ::toString(reduction_on_gpu_) + "\n";
+  str += "\tPer Device Reduction on GPU: " + ::toString(reduction_on_gpu_) + "\n";
   str += "\tSort on GPU: " + ::toString(sort_on_gpu_) + "\n";
   str += "\tUse Streaming Top N: " + ::toString(use_streaming_top_n_) + "\n";
   str += "\tOutput Columnar: " + ::toString(output_columnar_) + "\n";

@@ -833,7 +833,8 @@ void ResultSetReductionJIT::reduceOneEntryTargetsNoCollisions(
 }
 
 void ResultSetReductionJIT::reduceOneEntryBaseline(
-    const ReductionCode& reduction_code) const {
+    const ReductionCode& reduction_code,
+    const ExecutorDeviceType device_type) const {
   auto ir_reduce_one_entry = reduction_code.ir_reduce_one_entry.get();
   const auto this_targets_ptr_arg = ir_reduce_one_entry->arg(0);
   const auto that_targets_ptr_arg = ir_reduce_one_entry->arg(1);
@@ -864,7 +865,8 @@ void ResultSetReductionJIT::reduceOneEntryBaseline(
                   target_info,
                   target_logical_idx,
                   j,
-                  init_agg_val_idx,
+                  device_type == ExecutorDeviceType::GPU ? j
+                                                         : init_agg_val_idx,
                   j,
                   ir_reduce_one_entry);
     if (target_logical_idx + 1 == targets_.size()) {
@@ -1440,7 +1442,7 @@ ReductionCode GpuReductionHelperJIT::codegen() const {
       break;
     }
     case QueryDescriptionType::GroupByBaselineHash: {
-      reduceOneEntryBaseline(reduction_code);
+      reduceOneEntryBaseline(reduction_code, ExecutorDeviceType::GPU);
       reduceOneEntryBaselineIdx_GPU(reduction_code);
 
       break;

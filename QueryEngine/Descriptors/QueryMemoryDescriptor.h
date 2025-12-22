@@ -442,6 +442,7 @@ class QueryMemoryDescriptor {
   mutable size_t num_available_threads_{1};
 
   int64_t static constexpr kLargeGroupbyEntryCount{10000};
+  int64_t static constexpr kLargeGroupbyBufferMemorySize{16*1024*1024};
 
   size_t getTotalBytesOfColumnarBuffers() const;
   size_t getTotalBytesOfColumnarBuffers(const size_t num_entries_per_column) const;

@@ -63,6 +63,7 @@ HEAVYAI_DEFINE_ENUM_CLASS(KernelParam,
                           ERROR_CODE,
                           TOTAL_MATCHED,
                           GROUPBY_BUF,
+                          REDUCED_BUF,
                           NUM_FRAGMENTS,
                           NUM_TABLES,
                           ROW_INDEX_RESUME,
@@ -74,6 +75,8 @@ HEAVYAI_DEFINE_ENUM_CLASS(KernelParam,
                           MAX_MATCHED,
                           INIT_AGG_VALS,
                           JOIN_HASH_TABLES,
-                          ROW_FUNC_MGR)
+                          ROW_FUNC_MGR,
+                          NUM_ENTRIES,
+                          BUFFER_SIZE)
 
 }  // namespace heavyai
