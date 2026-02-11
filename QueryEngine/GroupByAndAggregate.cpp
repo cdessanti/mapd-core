@@ -741,8 +741,10 @@ CountDistinctDescriptors init_count_distinct_descriptors(
                                     1});
         continue;
       }
-      const auto sub_bitmap_count =
-          get_count_distinct_sub_bitmap_count(bitmap_sz_bits, ra_exe_unit, device_type);
+      const auto sub_bitmap_count = get_count_distinct_sub_bitmap_count(
+          get_bucketed_cardinality_without_nulls(arg_range_info),
+          ra_exe_unit,
+          device_type);
       size_t worst_case_num_groups{1};
       if (arg_range_info.hash_type_ == QueryDescriptionType::GroupByPerfectHash &&
           !(arg_ti.is_buffer() || arg_ti.is_geometry())) {  // TODO(alex): allow bitmap
@@ -1951,12 +1953,6 @@ void GroupByAndAggregate::codegenCountDistinct(
     const auto base_host_addr = getAdditionalLiteral(-2);
     agg_args.push_back(base_dev_addr);
     agg_args.push_back(base_host_addr);
-    agg_args.push_back(LL_INT(int64_t(count_distinct_descriptor.sub_bitmap_count)));
-    CHECK_EQ(size_t(0),
-             count_distinct_descriptor.bitmapPaddedSizeBytes() %
-                 count_distinct_descriptor.sub_bitmap_count);
-    agg_args.push_back(LL_INT(int64_t(count_distinct_descriptor.bitmapPaddedSizeBytes() /
-                                      count_distinct_descriptor.sub_bitmap_count)));
   }
   if (count_distinct_descriptor.impl_type_ == CountDistinctImplType::Bitmap) {
     emitCall(agg_fname, agg_args);

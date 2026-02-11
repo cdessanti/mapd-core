@@ -386,9 +386,7 @@ extern "C" GPU_RT_STUB void agg_count_distinct_bitmap_gpu(int64_t*,
                                                           const int64_t,
                                                           const int64_t,
                                                           const int64_t,
-                                                          const int64_t,
-                                                          const uint64_t,
-                                                          const uint64_t) {}
+                                                          const int64_t) {}
 
 extern "C" GPU_RT_STUB int32_t agg_mode_func_gpu(int64_t* agg,
                                                  int64_t const val,
@@ -1229,9 +1227,7 @@ extern "C" GPU_RT_STUB void agg_count_distinct_bitmap_skip_val_gpu(int64_t*,
                                                                    const int64_t,
                                                                    const int64_t,
                                                                    const int64_t,
-                                                                   const int64_t,
-                                                                   const uint64_t,
-                                                                   const uint64_t) {}
+                                                                   const int64_t) {}
 
 extern "C" RUNTIME_EXPORT ALWAYS_INLINE uint32_t agg_count_int32(uint32_t* agg,
                                                                  const int32_t) {
