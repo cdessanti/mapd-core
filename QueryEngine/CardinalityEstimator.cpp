@@ -20,7 +20,7 @@
 #include "RelAlgExecutor.h"
 
 int64_t g_large_ndv_threshold = 10000000;
-size_t g_large_ndv_multiplier = 256;
+size_t g_large_ndv_multiplier = 32;
 
 namespace Analyzer {
 
@@ -33,7 +33,8 @@ size_t LargeNDVEstimator::getBufferSize() const {
 size_t ResultSet::getNDVEstimator() const {
   CHECK(dynamic_cast<const Analyzer::NDVEstimator*>(estimator_.get()));
   CHECK(host_estimator_buffer_);
-  auto bits_set = bitmap_set_size(host_estimator_buffer_, estimator_->getBufferSize());
+  auto bits_set = bitmap_set_size(
+      getHostEstimatorBuffer(), estimator_->getBufferSize(), cpu_threads() / 4);
   if (bits_set == 0) {
     // empty result set, return 1 for a groups buffer size of 1
     return 1;

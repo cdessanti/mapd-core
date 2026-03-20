@@ -162,7 +162,7 @@ ResultSet::ResultSet(const std::shared_ptr<const Analyzer::Estimator> estimator,
                                    estimator_->getBufferSize());
   } else {
     host_estimator_buffer_ =
-        static_cast<int8_t*>(checked_calloc(estimator_->getBufferSize(), 1));
+        data_mgr_->getCpuBufferMgr()->alloc(estimator_->getBufferSize());
   }
 }
 
@@ -215,7 +215,7 @@ ResultSet::~ResultSet() {
   }
   if (host_estimator_buffer_) {
     CHECK(device_type_ == ExecutorDeviceType::CPU || device_estimator_buffer_);
-    free(host_estimator_buffer_);
+    data_mgr_->getCpuBufferMgr()->free(host_estimator_buffer_);
   }
   if (device_estimator_buffer_) {
     CHECK(data_mgr_);
@@ -699,7 +699,7 @@ int8_t* ResultSet::getDeviceEstimatorBuffer() const {
 }
 
 int8_t* ResultSet::getHostEstimatorBuffer() const {
-  return host_estimator_buffer_;
+  return host_estimator_buffer_->getMemoryPtr();
 }
 
 void ResultSet::syncEstimatorBuffer() const {
@@ -707,10 +707,10 @@ void ResultSet::syncEstimatorBuffer() const {
   CHECK(!host_estimator_buffer_);
   CHECK_EQ(size_t(0), estimator_->getBufferSize() % sizeof(int64_t));
   host_estimator_buffer_ =
-      static_cast<int8_t*>(checked_calloc(estimator_->getBufferSize(), 1));
+      data_mgr_->getCpuBufferMgr()->alloc(estimator_->getBufferSize());
   CHECK(device_estimator_buffer_);
   auto device_buffer_ptr = device_estimator_buffer_->getMemoryPtr();
-  cuda_allocator_->copyFromDevice(host_estimator_buffer_,
+  cuda_allocator_->copyFromDevice(host_estimator_buffer_->getMemoryPtr(),
                                   device_buffer_ptr,
                                   estimator_->getBufferSize(),
                                   "Estimator buffer");

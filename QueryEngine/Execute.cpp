@@ -72,6 +72,7 @@
 #include "Shared/scope.h"
 #include "Shared/threading.h"
 
+bool g_enable_intrinsics_for_bitmap_count{true};
 bool g_enable_watchdog{false};
 bool g_enable_dynamic_watchdog{false};
 size_t g_watchdog_none_encoded_string_translation_limit{1000000UL};

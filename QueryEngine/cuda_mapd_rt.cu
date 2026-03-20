@@ -1394,9 +1394,10 @@ extern "C" __device__ void linear_probabilistic_count(uint8_t* bitmap,
   const uint32_t bit_pos = MurmurHash3(key_bytes, key_len, 0) % (bitmap_bytes * 8);
   const uint32_t word_idx = bit_pos / 32;
   const uint32_t bit_idx = bit_pos % 32;
-  const auto actual_value = *((uint32_t*)bitmap + word_idx) & (1u << bit_idx);
+  const auto bitmap_ = reinterpret_cast<uint32_t*>(bitmap);
+  const auto actual_value = *(bitmap_ + word_idx) & (1u << bit_idx);
   if (!actual_value) {
-    atomicOr(((uint32_t*)bitmap) + word_idx, 1u << bit_idx);
+    atomicOr(bitmap_ + word_idx, 1u << bit_idx);
   }
 }
 

@@ -28,25 +28,79 @@
 
 #include "ThirdParty/robin_hood/robin_hood.h"
 
+#include <immintrin.h>
+#include <tbb/parallel_for.h>
+
 #include <bitset>
 #include <vector>
+extern bool g_enable_intrinsics_for_bitmap_count;
 
 using CountDistinctDescriptors = std::vector<CountDistinctDescriptor>;
 using CountDistinctSet = robin_hood::unordered_set<int64_t>;
 
-inline size_t bitmap_set_size(const int8_t* bitmap, const size_t bitmap_byte_sz) {
+inline size_t bitmap_set_size(const int8_t* bitmap,
+                              const size_t bitmap_byte_sz,
+                              const size_t degree_of_parallelism = 0) {
   const auto bitmap_word_count = bitmap_byte_sz >> 3;
   const auto bitmap_rem_bytes = bitmap_byte_sz & 7;
-  const auto bitmap64 = reinterpret_cast<const int64_t*>(bitmap);
+  const auto bitmap64 = reinterpret_cast<const uint64_t*>(bitmap);
   size_t set_size = 0;
-  for (size_t i = 0; i < bitmap_word_count; ++i) {
-    std::bitset<64> word_bitset(bitmap64[i]);
-    set_size += word_bitset.count();
+  if (degree_of_parallelism) {
+    size_t chunk_count = degree_of_parallelism;
+    tbb::task_arena limited_arena(chunk_count);
+    std::vector<size_t> results(chunk_count);
+
+    limited_arena.execute([&]() {
+      tbb::parallel_for(size_t(0), chunk_count, [&](size_t i) {
+        size_t local_set_size = 0;
+        for (size_t j = i * bitmap_word_count / chunk_count;
+             j < bitmap_word_count && j < (i + 1) * bitmap_word_count / chunk_count;
+             j += 1) {
+          if (bitmap64[j] == 0) {
+            continue;
+          }
+          if (g_enable_intrinsics_for_bitmap_count) {
+            local_set_size += _mm_popcnt_u64(bitmap64[j]);
+          } else {
+            std::bitset<64> word_bitset(bitmap64[i]);
+            set_size += word_bitset.count();
+          }
+        }
+        results[i] = local_set_size;
+      });
+    });
+
+    for (size_t i = 0; i < chunk_count; ++i) {
+      set_size += results[i];
+    }
+
+  } else {
+    for (size_t i = 0; i < bitmap_word_count; ++i) {
+      if (bitmap64[i] == 0) {
+        continue;
+      }
+      if (g_enable_intrinsics_for_bitmap_count) {
+        set_size += _mm_popcnt_u64(bitmap64[i]);
+      } else {
+        std::bitset<64> word_bitset(bitmap64[i]);
+        set_size += word_bitset.count();
+      }
+    }
   }
+
   const auto rem_bitmap = reinterpret_cast<const int8_t*>(&bitmap64[bitmap_word_count]);
+  uint8_t actual_data;
   for (size_t i = 0; i < bitmap_rem_bytes; ++i) {
-    std::bitset<8> byte_bitset(rem_bitmap[i]);
-    set_size += byte_bitset.count();
+    actual_data = rem_bitmap[i];
+    if (actual_data == 0) {
+      continue;
+    }
+    if (g_enable_intrinsics_for_bitmap_count) {
+      set_size += _mm_popcnt_u32((uint32_t)actual_data);
+    } else {
+      std::bitset<8> byte_bitset(rem_bitmap[i]);
+      set_size += byte_bitset.count();
+    }
   }
   return set_size;
 }

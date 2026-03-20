@@ -245,6 +245,7 @@ extern bool g_enable_smem_weigth;
 extern bool g_enable_smem_opt_sum;
 extern bool g_enable_gpu_insitu_reduction;
 extern bool g_enable_adjust_num_blocks_per_sm;
+extern bool g_enable_intrinsics_for_bitmap_count;
 extern bool g_use_estimator_result_cache;
 extern bool g_enable_lazy_fetch;
 extern size_t g_jump_buffer_size;

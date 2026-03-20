@@ -1120,7 +1120,7 @@ class ResultSet {
 
   const std::shared_ptr<const Analyzer::Estimator> estimator_;
   Data_Namespace::AbstractBuffer* device_estimator_buffer_{nullptr};
-  mutable int8_t* host_estimator_buffer_{nullptr};
+  mutable Data_Namespace::AbstractBuffer* host_estimator_buffer_{nullptr};
   Data_Namespace::DataMgr* data_mgr_;
   std::shared_ptr<CudaAllocator> cuda_allocator_{nullptr};
   CUstream cuda_stream_{nullptr};
