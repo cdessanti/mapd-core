@@ -77,6 +77,12 @@ struct CubinResult {
  */
 void nvidia_jit_warmup();
 
+CubinResult init_cubin(const CudaMgr_Namespace::CudaMgr* cuda_mgr, int const device_id);
+void add_ptx_to_cubin(const std::string& ptx,
+                             const CudaMgr_Namespace::CudaMgr* cuda_mgr,
+                             int const device_id,
+                             CubinResult& cubin_result);
+
 /**
  * Compile and link PTX from the LLVM NVPTX backend with the CUDA runtime module and
  * device linker to create executable GPU device code.

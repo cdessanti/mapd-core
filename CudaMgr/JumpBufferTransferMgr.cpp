@@ -44,6 +44,9 @@ JumpBufferTransferMgr::JumpBufferTransferMgr(
       jump_buffers_.back()->buffer =
           allocatePinnedHostMem(device_num, g_jump_buffer_size);
       jump_buffers_.back()->size = g_jump_buffer_size;
+      jump_buffers_.back()->decomp_buffer =
+          allocatePinnedHostMem(device_num, g_jump_buffer_size);
+      jump_buffers_.back()->decomp_buffer_size = g_jump_buffer_size;
     }
 
     CHECK_EQ(device_count_, jump_buffers_.size());
@@ -60,6 +63,7 @@ JumpBufferTransferMgr::~JumpBufferTransferMgr() {
       if (jump_buffer) {
         try {
           freePinnedHostMem(device_num, jump_buffer->buffer);
+          freePinnedHostMem(device_num, jump_buffer->decomp_buffer);
         } catch (const CudaErrorException& e) {
           if (e.getStatus() == CUDA_ERROR_DEINITIALIZED) {
             // Skip further attempts to free pinned host memory if the CUDA driver is
@@ -514,6 +518,25 @@ int8_t* JumpBufferTransferMgr::allocatePinnedHostMem(int32_t device_num,
   void* host_ptr;
   check_error(cuMemHostAlloc(&host_ptr, num_bytes, CU_MEMHOSTALLOC_PORTABLE));
   return reinterpret_cast<int8_t*>(host_ptr);
+}
+
+int8_t* JumpBufferTransferMgr::getDecompJumpBufferMemoryLocation(int32_t device_num) {
+  auto& jump_buffer = *jump_buffers_[device_num];
+  if (!jump_buffer.decomp_buffer_inuse.test_and_set()) {
+    return jump_buffer.decomp_buffer;
+  } else {
+    return nullptr;
+  }
+}
+
+void JumpBufferTransferMgr::freeDecompJumpBufferMemory(int32_t device_num) {
+  auto& jump_buffer = *jump_buffers_[device_num];
+  jump_buffer.decomp_buffer_inuse.clear();
+}
+
+size_t JumpBufferTransferMgr::getDecompJumpBufferMemorySize(int32_t device_num) {
+  auto& jump_buffer = *jump_buffers_[device_num];
+  return jump_buffer.decomp_buffer_size;
 }
 
 void JumpBufferTransferMgr::freePinnedHostMem(int32_t device_num, int8_t* host_ptr) {

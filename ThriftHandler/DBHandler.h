@@ -868,7 +868,8 @@ class DBHandler : public HeavyIf {
                           const ResultSet& results,
                           const bool column_format,
                           const int32_t first_n,
-                          const int32_t at_most_n);
+                          const int32_t at_most_n,
+                          const bool parallel = false);
 
   // Use ExecutionResult to populate a TQueryResult
   //    calls convertRows, but after some setup using session_info

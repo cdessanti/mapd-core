@@ -83,7 +83,6 @@
 #include "Shared/scope.h"
 #include "UdfCompiler/UdfCompiler.h"
 
-
 #ifdef HAVE_AWS_S3
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #endif
@@ -99,6 +98,7 @@
 #else
 #include <boost/process/search_path.hpp>
 #endif
+#include <atomic>
 #include <boost/program_options.hpp>
 #include <boost/tokenizer.hpp>
 #include <chrono>
@@ -133,6 +133,7 @@ bool g_allow_system_dashboard_update{false};
 bool g_uniform_request_ids_per_thrift_call{true};
 extern bool g_allow_memory_status_log;
 extern int g_max_num_gpu_per_query;
+bool g_parallel_conver_rows{true};
 
 using Catalog_Namespace::Catalog;
 using Catalog_Namespace::SysCatalog;
@@ -1262,7 +1263,8 @@ void DBHandler::convertData(TQueryResult& _return,
                   *result.getRows(),
                   column_format,
                   first_n,
-                  at_most_n);
+                  at_most_n,
+                  true);
       break;
     case ExecutionResult::SimpleResult:
       convertResult(_return, *result.getRows(), true);
@@ -6497,50 +6499,105 @@ void DBHandler::convertRows(TQueryResult& _return,
                             const ResultSet& results,
                             const bool column_format,
                             const int32_t first_n,
-                            const int32_t at_most_n) {
+                            const int32_t at_most_n,
+                            const bool parallel) {
   query_state::Timer timer = query_state_proxy.createTimer(__func__);
   _return.row_set.row_desc = ThriftSerializers::target_meta_infos_to_thrift(targets);
   int32_t fetched{0};
-  if (column_format) {
+  auto limit = results.getLimit();
+  size_t number_of_chunks = cpu_threads() / 2;
+  if (parallel && column_format && results.entryCount() > number_of_chunks * 4 && !results.isSorted()) {
+    const size_t number_of_output_rows = results.entryCount();
     _return.row_set.is_columnar = true;
+
+    tbb::task_arena limited_arena(number_of_chunks);
+
+    using row = std::vector<TargetValue>;
+    using row_container = std::vector<row>;
+    std::vector<row_container> per_thread_row_container(number_of_chunks);
+
+    std::atomic_uint64_t rows_found{0};
+    limited_arena.execute([&] {
+      tbb::parallel_for(size_t(0), number_of_chunks, [&](size_t chunk) {
+        auto& local_row_container = per_thread_row_container[chunk];
+        size_t index{chunk};
+        while (index < number_of_output_rows) {
+          const auto crt_row = results.getRowAt(index);
+          index += number_of_chunks;
+          if (!crt_row.empty()) {
+            local_row_container.push_back(std::move(crt_row));
+            if (limit) {
+              rows_found++;
+              if (rows_found >= limit) {
+                break;
+              }
+            }
+          }
+        };
+      });
+    });
+
     std::vector<TColumn> tcolumns(results.colCount());
-    while (first_n == -1 || fetched < first_n) {
-      const auto crt_row = results.getNextRow(true, true);
-      if (crt_row.empty()) {
-        break;
-      }
-      ++fetched;
-      if (at_most_n >= 0 && fetched > at_most_n) {
-        THROW_DB_EXCEPTION("The result contains more rows than the specified cap of " +
-                           std::to_string(at_most_n));
-      }
-      for (size_t i = 0; i < results.colCount(); ++i) {
-        const auto agg_result = crt_row[i];
-        value_to_thrift_column(agg_result, targets[i].get_type_info(), tcolumns[i]);
+    for (auto& row_container : per_thread_row_container) {
+      for (const auto& row : row_container) {
+        if ((first_n == -1 || fetched < first_n) &&
+            (fetched < (int32_t)limit || !limit)) {
+          for (size_t i = 0; i < results.colCount(); ++i) {
+            const auto agg_result = row[i];
+            value_to_thrift_column(agg_result, targets[i].get_type_info(), tcolumns[i]);
+          }
+          ++fetched;
+        } else {
+          break;
+        }
       }
     }
+
     for (size_t i = 0; i < results.colCount(); ++i) {
       _return.row_set.columns.push_back(tcolumns[i]);
     }
   } else {
-    _return.row_set.is_columnar = false;
-    while (first_n == -1 || fetched < first_n) {
-      const auto crt_row = results.getNextRow(true, true);
-      if (crt_row.empty()) {
-        break;
+    if (column_format) {
+      _return.row_set.is_columnar = true;
+      std::vector<TColumn> tcolumns(results.colCount());
+      while (first_n == -1 || fetched < first_n) {
+        const auto crt_row = results.getNextRow(true, true);
+        if (crt_row.empty()) {
+          break;
+        }
+        ++fetched;
+        if (at_most_n >= 0 && fetched > at_most_n) {
+          THROW_DB_EXCEPTION("The result contains more rows than the specified cap of " +
+                             std::to_string(at_most_n));
+        }
+        for (size_t i = 0; i < results.colCount(); ++i) {
+          const auto agg_result = crt_row[i];
+          value_to_thrift_column(agg_result, targets[i].get_type_info(), tcolumns[i]);
+        }
       }
-      ++fetched;
-      if (at_most_n >= 0 && fetched > at_most_n) {
-        THROW_DB_EXCEPTION("The result contains more rows than the specified cap of " +
-                           std::to_string(at_most_n));
-      }
-      TRow trow;
-      trow.cols.reserve(results.colCount());
       for (size_t i = 0; i < results.colCount(); ++i) {
-        const auto agg_result = crt_row[i];
-        trow.cols.push_back(value_to_thrift(agg_result, targets[i].get_type_info()));
+        _return.row_set.columns.push_back(tcolumns[i]);
       }
-      _return.row_set.rows.push_back(trow);
+    } else {
+      _return.row_set.is_columnar = false;
+      while (first_n == -1 || fetched < first_n) {
+        const auto crt_row = results.getNextRow(true, true);
+        if (crt_row.empty()) {
+          break;
+        }
+        ++fetched;
+        if (at_most_n >= 0 && fetched > at_most_n) {
+          THROW_DB_EXCEPTION("The result contains more rows than the specified cap of " +
+                             std::to_string(at_most_n));
+        }
+        TRow trow;
+        trow.cols.reserve(results.colCount());
+        for (size_t i = 0; i < results.colCount(); ++i) {
+          const auto agg_result = crt_row[i];
+          trow.cols.push_back(value_to_thrift(agg_result, targets[i].get_type_info()));
+        }
+        _return.row_set.rows.push_back(trow);
+      }
     }
   }
 }
@@ -7759,7 +7816,6 @@ void DBHandler::shutdown() {
   if (render_handler_) {
     render_handler_->shutdown();
   }
-
 
   Catalog_Namespace::SysCatalog::destroy();
 }

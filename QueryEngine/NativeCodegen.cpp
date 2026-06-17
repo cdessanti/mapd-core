@@ -64,6 +64,8 @@ static_assert(false, "LLVM Version >= 14 is required.");
 #include <llvm/Support/Host.h>
 #endif
 
+#include <future>
+#include <thread>
 #include "CudaMgr/CudaMgr.h"
 #include "Geospatial/GeosVersion.h"
 #include "QueryEngine/CodeGenerator.h"
@@ -1330,6 +1332,9 @@ std::shared_ptr<GpuCompilationContext> CodeGenerator::generateNativeGPUCode(
     const GPUTarget& gpu_target,
     std::chrono::steady_clock::time_point& compile_start_timer) {
 #ifdef HAVE_CUDA
+  auto device_id = *executor->getAvailableDevicesToProcessQuery().begin();
+  std::future<CubinResult> future_cubin =
+      std::async(std::launch::async, init_cubin, gpu_target.cuda_mgr, device_id);
   auto timer = DEBUG_TIMER(__func__);
   auto llvm_module = func->getParent();
   /*
@@ -1498,8 +1503,10 @@ std::shared_ptr<GpuCompilationContext> CodeGenerator::generateNativeGPUCode(
     throw QueryMustRunOnCpu();
   }
   LOG(PTX) << "PTX for the GPU:\n" << ptx << "\nEnd of PTX";
-  CubinResult cubin_result = ptx_to_cubin(
-      ptx, gpu_target.cuda_mgr, *executor->getAvailableDevicesToProcessQuery().begin());
+
+  CubinResult cubin_result = future_cubin.get();
+  (void)add_ptx_to_cubin(ptx, gpu_target.cuda_mgr, device_id, cubin_result);
+
   VLOG(1) << "GPU code compilation finished: " << timer_stop(compile_start_timer)
           << " ms";
   auto gpu_compilation_context = std::make_shared<GpuCompilationContext>(
@@ -3113,7 +3120,7 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
   }
   if (has_reduction_function_on_gpu(query_mem_desc.get()) &&
       (gpu_shared_mem_optimization || !query_mem_desc->blocksShareMemory()) &&
-    co.device_type == ExecutorDeviceType::GPU) {
+      co.device_type == ExecutorDeviceType::GPU) {
     // (TODO) Move the init and the reduce out of query_function
     // to re-enable deinterleaved bins to speed up queries
     // that didn't fit in shared memory
@@ -3348,7 +3355,7 @@ Executor::compileWorkUnit(const std::vector<InputTableInfo>& query_infos,
   if ((query_mem_desc->isGpuSharedMemoryUsed() && query_mem_desc->hasReductionOnGpu()) ||
       (!query_mem_desc->isGpuSharedMemoryUsed() && query_mem_desc->hasReductionOnGpu() &&
        !query_mem_desc->blocksShareMemory())) {
-        CHECK_EQ(co.device_type, ExecutorDeviceType::GPU);
+    CHECK_EQ(co.device_type, ExecutorDeviceType::GPU);
     if (query_mem_desc->getQueryDescriptionType() ==
             QueryDescriptionType::GroupByPerfectHash ||
         query_mem_desc->getQueryDescriptionType() ==

@@ -511,6 +511,10 @@ class ResultSet {
 
   const bool isCached() const { return cached_; }
 
+  void setSorted(bool val) { sorted_ = val; }
+
+  const bool isSorted() const { return sorted_; }
+
   void setExecTime(const long exec_time) { query_exec_time_ = exec_time; }
 
   const long getExecTime() const { return query_exec_time_; }
@@ -1141,6 +1145,7 @@ class ResultSet {
 
   // only used by data recycler
   bool cached_;  // indicator that this resultset is cached
+  bool sorted_;  // indicator that this resultset has been sorted
   size_t
       query_exec_time_;  // an elapsed time to process the query for this resultset (ms)
   QueryPlanHash query_plan_;  // a hashed query plan DAG of this resultset

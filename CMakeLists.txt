@@ -17,6 +17,7 @@ if(IS_REDHAT)
   message(STATUS "OS is Redhat or derivative")
 endif()
 
+# Add compiler option to speed-up the count distinct output on x86
 if("${ARCH}" STREQUAL "x86_64")
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-mpopcnt>")
 endif()
@@ -257,12 +258,13 @@ endif()
 
 option(ENABLE_CUDA "Enable CUDA support" ON)
 if(ENABLE_CUDA)
+  find_package(nvcomp CONFIG REQUIRED)
   enable_language(CUDA)
   include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   include_directories(ThirdParty/warpcore/include)
-  include_directories(/home/mapd/nvcomp-linux-x86_64-5.0.0.6_cuda12-archive/include)
-  link_directories(/home/mapd/nvcomp-linux-x86_64-5.0.0.6_cuda12-archive/lib)
-  list(APPEND CUDA_LIBRARIES cuda nvcomp nvcomp_cpu culibos curand_static)
+  include_directories(${nvcomp_INCLUDE_DIR})
+  link_directories(${nvcomp_LIBRARY_DIR})
+  list(APPEND CUDA_LIBRARIES cuda culibos curand_static nvJitLink nvrtc_static nvptxcompiler_static nvrtc-builtins_static nvcomp_static nvcomp_cpu_static )
   list(APPEND CMAKE_CUDA_FLAGS --extended-lambda)  # required by warpcore
   add_definitions("-DHAVE_CUDA")
 else()
@@ -312,7 +314,8 @@ if(ENABLE_CUDA)
     list(APPEND MAPD_CUDA_OPTIONS -Wno-deprecated-gpu-targets)
     # set one arch for custom_command CUDA compiles
     set (CUSTOM_COMMAND_CUDA_ARCHITECTURES
-      -gencode=arch=compute_${NVIDIA_COMPUTE_CAPABILITY},code=compute_${NVIDIA_COMPUTE_CAPABILITY}
+      -gencode=arch=compute_${NVIDIA_COMPUTE_CAPABILITY},code=sm_${NVIDIA_COMPUTE_CAPABILITY}
+      --maxrregcount=64
       -Wno-deprecated-gpu-targets
     )
     # clean up compute capability build
@@ -334,14 +337,15 @@ if(ENABLE_CUDA)
     list(APPEND MAPD_CUDA_OPTIONS -Wno-deprecated-gpu-targets)
     # set all supported archs for custom_command CUDA compiles
     set(CUSTOM_COMMAND_CUDA_ARCHITECTURES
-      -gencode=arch=compute_60,code=compute_60;
-      -gencode=arch=compute_70,code=compute_70;
-      -gencode=arch=compute_75,code=compute_75;
-      -gencode=arch=compute_80,code=compute_80;
-      -gencode=arch=compute_86,code=compute_86;
-      -gencode=arch=compute_89,code=compute_89;
-      -gencode=arch=compute_90,code=compute_90;
-      -Wno-deprecated-gpu-targets)
+      -gencode=arch=compute_60,code=sm_60;
+      -gencode=arch=compute_70,code=sm_70;
+      -gencode=arch=compute_75,code=sm_75;
+      -gencode=arch=compute_80,code=sm_80;
+      -gencode=arch=compute_86,code=sm_86;
+      -gencode=arch=compute_89,code=sm_89;
+      -gencode=arch=compute_90,code=sm_90;
+      -Wno-deprecated-gpu-targets
+      --maxrregcount=64)
     if(ENABLE_ONLY_ONE_ARCH)
       message(STATUS "ENABLE_ONLY_ONE_ARCH ignored because NvidiaComputeCapability.txt not found or not readable")
     endif()

@@ -21,6 +21,9 @@
 #include <Logger/Logger.h>
 #include <Shared/types.h>
 
+extern bool g_enable_d2h_compression;
+extern bool g_enable_d2h_comp_double_buffering;  // levare
+
 CudaAllocator::CudaAllocator(Data_Namespace::DataMgr* data_mgr,
                              const int device_id,
                              CUstream cuda_stream)
@@ -107,9 +110,61 @@ void CudaAllocator::copyToDevice(void* device_dst,
 void CudaAllocator::copyFromDevice(void* host_dst,
                                    const void* device_src,
                                    const size_t num_bytes,
-                                   std::optional<std::string_view> tag) const {
+                                   std::optional<std::string_view> tag,
+                                   GpuCompressionAlgo algo) const {
   const auto cuda_mgr = data_mgr_->getCudaMgr();
   CHECK(cuda_mgr);
+  if (algo != GpuCompressionAlgo::kNocomopression && g_enable_d2h_compression) {
+    bool bitcomp_copy_error{false};
+    auto actual_algo =
+        (algo == GpuCompressionAlgo::kNvidiaBitcompNativeAuto) ? 
+        cuda_mgr->getBestCompressionAlgo(num_bytes, device_id_, 0, (bitcompAlgorithm_t) 0)
+                     : getBitcompNativeAlgoType(algo);
+    size_t estimate_buffer_size =
+        cuda_mgr->evaluateCompression(num_bytes, device_id_, 0, actual_algo);
+    if (estimate_buffer_size) {
+      // actual_algo = cuda_mgr->getBestCompressionAlgo(num_bytes, device_id_,
+      // estimate_buffer_size, bitcomp_algo);
+      Data_Namespace::AbstractBuffer* estimate_buffer =
+          CudaAllocator::allocGpuAbstractBuffer(
+              data_mgr_, estimate_buffer_size, device_id_);
+      size_t temp_buffer_size{0};
+      try {
+        temp_buffer_size =
+            cuda_mgr->estimateCompressedBufferSize(num_bytes,
+                                                   (int8_t*)device_src,
+                                                   estimate_buffer_size,
+                                                   estimate_buffer->getMemoryPtr(),
+                                                   actual_algo);
+      } catch (...) {
+        data_mgr_->free(estimate_buffer);
+        bitcomp_copy_error = true;
+      }
+      data_mgr_->free(estimate_buffer);
+      if (temp_buffer_size && cuda_mgr->evaluateCompression(
+                                  num_bytes, device_id_, temp_buffer_size, actual_algo)) {
+        estimate_buffer = CudaAllocator::allocGpuAbstractBuffer(
+            data_mgr_, temp_buffer_size, device_id_);
+        try {
+          cuda_mgr->copyDeviceToHostCompressed((int8_t*)host_dst,
+                                               (int8_t*)device_src,
+                                               num_bytes,
+                                               tag,
+                                               cuda_stream_,
+                                               actual_algo,
+                                               estimate_buffer->getMemoryPtr(),
+                                               temp_buffer_size);
+          data_mgr_->free(estimate_buffer);
+        } catch (...) {
+          data_mgr_->free(estimate_buffer);
+          bitcomp_copy_error = true;
+        }
+        if (!bitcomp_copy_error) {
+          return;
+        }
+      }
+    }
+  }
   cuda_mgr->copyDeviceToHost(
       (int8_t*)host_dst, (int8_t*)device_src, num_bytes, tag, cuda_stream_);
 }

@@ -372,7 +372,8 @@ std::vector<int64_t*> QueryExecutionContext::launchGpuCode(
     device_allocator_->copyFromDevice(reinterpret_cast<int8_t*>(error_codes.data()),
                                       reinterpret_cast<int8_t*>(err_desc),
                                       error_codes.size() * sizeof(error_codes[0]),
-                                      "Query error code buffer");
+                                      "Query error code buffer",
+                                      GpuCompressionAlgo::kNvidiaBitcompNativeSparse);
     *error_code = aggregate_error_codes(error_codes);
     if (*error_code > 0) {
       return {};
@@ -541,7 +542,8 @@ std::vector<int64_t*> QueryExecutionContext::launchGpuCode(
     device_allocator_->copyFromDevice(&error_codes[0],
                                       err_desc,
                                       error_codes.size() * sizeof(error_codes[0]),
-                                      "Query error code buffer");
+                                      "Query error code buffer",
+                                      GpuCompressionAlgo::kNvidiaBitcompNativeSparse);
     *error_code = aggregate_error_codes(error_codes);
     if (*error_code > 0) {
       return {};
@@ -556,7 +558,8 @@ std::vector<int64_t*> QueryExecutionContext::launchGpuCode(
       device_allocator_->copyFromDevice(host_out_vec,
                                         out_vec_dev_buffers[i],
                                         output_buffer_size_per_agg,
-                                        "Query output buffer device ptrs");
+                                        "Query output buffer device ptrs",
+                                        GpuCompressionAlgo::kNvidiaBitcompNativeDefault);
       out_vec.push_back(host_out_vec);
     }
   }
@@ -596,6 +599,7 @@ std::vector<int64_t*> QueryExecutionContext::launchCpuCode(
     std::vector<std::vector<const int8_t*>> col_buffers,
     const FetchResultFragmentInfo& fragment_info,
     const int32_t scan_limit,
+    Data_Namespace::DataMgr* data_mgr,
     int32_t* error_code,
     const uint32_t start_rowid,
     const uint32_t num_tables,
@@ -626,7 +630,7 @@ std::vector<int64_t*> QueryExecutionContext::launchCpuCode(
       estimator_result_set_.reset(new ResultSet(ra_exe_unit.estimator,
                                                 ExecutorDeviceType::CPU,
                                                 0 /*=device_id*/,
-                                                nullptr /*=data_mgr*/,
+                                                data_mgr /*=data_mgr*/,
                                                 nullptr /*=cuda_allocator*/));
     }
     out_vec.push_back(
@@ -789,7 +793,8 @@ void QueryExecutionContext::copyColBuffersToDevice(
   if (size_t const num_fragments = col_buffers.size()) {
     size_t const col_bytes = col_buffers.front().size() * sizeof(int8_t const*);
     int8_t* col_buffer_ptr = device_ptr + num_fragments * sizeof(int8_t*);
-    // The code could be shorter w/ one for loop, but the memory access is linear w/ two.
+    // The code could be shorter w/ one for loop, but the memory access is linear w/
+    // two.
     for (size_t i = 0; i < num_fragments; ++i) {
       device_allocator_->copyToDevice(
           device_ptr, &col_buffer_ptr, sizeof(int8_t*), "Input column buffer ptr");
@@ -1056,7 +1061,8 @@ QueryExecutionContext::prepareKernelParams(
 
   using KPL = KernelParamsLog;
 
-  // Copy data to device based on params w/ adjustments to LITERALS and JOIN_HASH_TABLES.
+  // Copy data to device based on params w/ adjustments to LITERALS and
+  // JOIN_HASH_TABLES.
   copyVectorToDevice(params[int(KP::ERROR_CODE)], error_codes, "params[ERROR_CODE]");
   params_log.values[int(KP::ERROR_CODE)] = KPL::NamedSize{"Size", error_codes.size()};
 

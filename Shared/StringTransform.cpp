@@ -124,6 +124,16 @@ std::string format_num_bytes(const size_t bytes) {
          std::to_string(fractional_digits) + " " + byte_units[byte_scale];
 }
 
+std::string format_microseconds(const size_t microseconds) {
+  const size_t leading_zero = 3;
+  const std::string formatted_ms =
+      microseconds < 2000
+          ? std::to_string(microseconds / 1000) + "." +
+                std::string(leading_zero - std::min(leading_zero, std::to_string(microseconds - microseconds / 1000 * 1000 ).length()), '0') + std::to_string(microseconds - microseconds / 1000 * 1000 ) + " ms"
+          : std::to_string(microseconds / 1000) + " ms";
+  return formatted_ms;
+}
+
 template <>
 std::string to_string(char const*&& v) {
   return std::string(v);

@@ -67,7 +67,8 @@ class CudaAllocator : public DeviceAllocator {
   void copyFromDevice(void* host_dst,
                       const void* device_src,
                       const size_t num_bytes,
-                      std::optional<std::string_view> tag) const override;
+                      std::optional<std::string_view> tag,
+                      GpuCompressionAlgo algo = GpuCompressionAlgo::kNocomopression) const override;
 
   void zeroDeviceMem(int8_t* device_ptr, const size_t num_bytes) const override;
 

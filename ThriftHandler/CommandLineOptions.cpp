@@ -1001,6 +1001,28 @@ void CommandLineOptions::fillDeveloperOptions() {
                          ->implicit_value(true),
                      "Enables/disables a more optimized columnarization method "
                      "for intermediate steps in multi-step queries.");
+  desc.add_options()("enable-compilation-optimization",
+                     po::value<bool>(&g_enable_compilation_optimization)
+                         ->default_value(g_enable_compilation_optimization)
+                         ->implicit_value(true),
+                     "Link minimal rt functions");
+  desc.add_options()("enable-d2h-compression",
+                     po::value<bool>(&g_enable_d2h_compression)
+                         ->default_value(g_enable_d2h_compression)
+                         ->implicit_value(true),
+                     "Buffers are compressed when transfered between device and host. "
+                     "The GPU do and estimation and in case the buffer is compressed");
+  desc.add_options()("enable-d2h-compression-double-buffering",
+                     po::value<bool>(&g_enable_d2h_comp_double_buffering)
+                         ->default_value(g_enable_d2h_comp_double_buffering)
+                         ->implicit_value(true),
+                     "The compression of the buffer is divided in two buffers to hide "
+                     "the transfer latency");
+  desc.add_options()("threshold-d2h-compression",
+                     po::value<size_t>(&g_threshold_d2h_compression)
+                         ->default_value(g_threshold_d2h_compression)
+                         ->implicit_value(1 << 20),
+                     "Minimum size of a buffer to be estiamed for compression. ");
   desc.add_options()(
       "enable-intrisincs-for-bitmap-count",
       po::value<bool>(&g_enable_intrinsics_for_bitmap_count)

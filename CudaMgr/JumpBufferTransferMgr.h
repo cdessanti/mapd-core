@@ -24,6 +24,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 #include <cuda.h>
 
@@ -34,6 +35,10 @@ class JumpBufferTransferMgr {
   JumpBufferTransferMgr(size_t device_count,
                         const std::vector<CUcontext>& device_contexts);
   ~JumpBufferTransferMgr();
+
+  int8_t* getDecompJumpBufferMemoryLocation(int32_t device_num);
+  void freeDecompJumpBufferMemory(int32_t device_num);
+  size_t getDecompJumpBufferMemorySize(int32_t device_num);
 
   bool shouldUseForHostToDeviceTransfer(size_t num_bytes) const;
 
@@ -59,6 +64,10 @@ class JumpBufferTransferMgr {
     int8_t* buffer{nullptr};
     size_t size{0};          // Total size of jump buffer
     size_t segment_size{0};  // Size of each segment (half of total buffer)
+    int8_t* decomp_buffer{nullptr};
+    size_t decomp_buffer_size{0};
+
+    std::atomic_flag decomp_buffer_inuse = ATOMIC_FLAG_INIT;  // For synchronizing concurrent use of decompression buffer
 
     std::mutex
         transfer_mutex;      // For synchronizing concurrent transfers/use of jump buffers

@@ -36,6 +36,8 @@
 #endif
 #include "Logger/Logger.h"
 #include "Shared/DeviceGroup.h"
+#include "Shared/StringTransform.h"
+#include "Shared/gpu_compressor.h"
 
 namespace CudaMgr_Namespace {
 
@@ -48,6 +50,16 @@ enum class NvidiaDeviceArch {
   Hopper,    // compute major = 9
   Blackwell  // compute major = 10 or 12
 };
+
+enum class MemCpyKind { kHostToDevice = 0, kDeviceToHost, kDeviceToDevice };
+
+
+typedef enum CudaCompression {
+  kNoCompression = 0,
+  kBitcompNativeAuto,
+  kBitcompNativeDefault,
+  kBitcompNativeSparse
+} CudaCompression;
 
 std::ostream& operator<<(std::ostream& os, const NvidiaDeviceArch device_arch);
 
@@ -74,6 +86,21 @@ struct DeviceProperties {
   int clockKhz;
   int numCore;
   size_t allocationGranularity;
+  int gpuCompressionApiOverhead;
+  std::vector<size_t> hostToDeviceBandwidthJumpBufferBs;
+  std::vector<size_t> deviceToHostBandwidthJumpBufferBs;
+  std::vector<size_t> hostToDeviceBandwidthPinnedBs;
+  std::vector<size_t> deviceToHostBandwidthPinnedBs;
+  std::vector<size_t> hostToDeviceBandwidthNotPinnedBs;
+  std::vector<size_t> deviceToHostBandwidthNotPinnedBs;
+  std::vector<size_t> cpuDecompressionSparseBandwidthBs;
+  std::vector<size_t> cpuDecompressionBandwidthBs;
+  std::vector<size_t> cpuSerialDecompressionSparseBandwidthBs;
+  std::vector<size_t> cpuSerialDecompressionBandwidthBs;
+  std::vector<size_t> gpuCompressionSparseBandwidthBs;
+  std::vector<size_t> gpuCompressionBandwidthBs;
+  std::vector<size_t> gpuCompressionSparseOnSparseBandwidthBs;
+  std::vector<size_t> gpuCompressionOnSparseBandwidthBs;
 };
 
 class CudaMgr {
@@ -88,6 +115,22 @@ class CudaMgr {
   size_t computePaddedBufferSize(size_t buf_size, size_t granularity) const;
   size_t getGranularity(const int device_num) const;
 
+  std::vector<char> getGpuRtFatbinFromCache() const { return gpu_rt_fatbin_; }
+
+  size_t estimateCompressedBufferSize(size_t num_bytes,
+                                      const int8_t* device_ptr,
+                                      size_t max_chunk_size,
+                                      int8_t* device_estimate_ptr,
+                                      bitcompAlgorithm_t algo);
+  bitcompAlgorithm_t getBestCompressionAlgo(size_t num_bytes,
+                                            const int device_num,
+                                            size_t estimated_num_bytes_compressed,
+                                            bitcompAlgorithm_t algo);
+  size_t evaluateCompression(size_t num_bytes,
+                             const int device_num,
+                             size_t estimated_num_bytes_compressed,
+                             bitcompAlgorithm_t algo);
+  bitcompAlgorithm_t getNVCompCompressionAlgo(CudaCompression algo);
   void copyHostToDevice(int8_t* device_ptr,
                         const int8_t* host_ptr,
                         const size_t num_bytes,
@@ -99,6 +142,15 @@ class CudaMgr {
                         const size_t num_bytes,
                         std::optional<std::string_view> tag,
                         CUstream cuda_stream = 0);
+  void copyDeviceToHostCompressed(int8_t* host_ptr,
+                                  const int8_t* device_ptr,
+                                  const size_t num_bytes,
+                                  std::optional<std::string_view> tag,
+                                  CUstream cuda_stream,
+                                  bitcompAlgorithm_t algo,
+                                  int8_t* device_temp_ptr,
+                                  const size_t device_temp_num_bytes,
+                                  bool decompress = true);
   void copyDeviceToDevice(int8_t* dest_ptr,
                           int8_t* src_ptr,
                           const size_t num_bytes,
@@ -210,16 +262,10 @@ class CudaMgr {
 
   void logDeviceProperties() const;
 
-  void finishDevicePropertiesInitialization() {
-    device_properties_initialized_ = true;
-  }
+  void finishDevicePropertiesInitialization() { device_properties_initialized_ = true; }
 
-  const std::vector<CUcontext>& getDeviceContexts() const {
-    return device_contexts_;
-  }
-  const int getGpuDriverVersion() const {
-    return gpu_driver_version_;
-  }
+  const std::vector<CUcontext>& getDeviceContexts() const { return device_contexts_; }
+  const int getGpuDriverVersion() const { return gpu_driver_version_; }
 
   void loadGpuModuleData(CUmodule* module,
                          const void* image,
@@ -250,12 +296,36 @@ class CudaMgr {
  private:
 #ifdef HAVE_CUDA
   void fillDeviceProperties();
+  void fillDevicePerfProperties();
   void initDeviceGroup();
   void createDeviceContexts();
   size_t computeMinSharedMemoryPerBlockForAllDevices() const;
   size_t computeMinNumMPsForAllDevices() const;
   void checkError(CUresult cu_result) const;
-
+  void loadGpuRtFatbinIntoCache();
+  void updateDevicePerfProperties(int device_num,
+                                  size_t buffer_size,
+                                  size_t transfer_time,
+                                  bool device_to_host,
+                                  bool use_jump_buffer,
+                                  size_t cpu_decompression_time = 0,
+                                  size_t gpu_compression_time = 0,
+                                  size_t num_bytes_compressed = 0,
+                                  bitcompAlgorithm_t algo = (bitcompAlgorithm_t)-1);
+  size_t calculateTransferBandwidth(void* host_buffer,
+                                    CUdeviceptr device_buffer,
+                                    size_t buffer_size,
+                                    MemCpyKind mode,
+                                    bool use_jump_buffers,
+                                    const int device_num);
+  size_t calculateCompressionBandwidth(CUdeviceptr device_buffer,
+                                       size_t buffer_size,
+                                       bitcompAlgorithm_t algo);
+  size_t calculateCpuDecompressionBandwidth(int8_t* host_temp_buffer,
+                                            size_t buffer_size,
+                                            size_t chunk_count,
+                                            bitcompAlgorithm_t algo);
+  void bitcompCheck(bitcompResult_t status) const;
   int gpu_driver_version_;
 #endif
 
@@ -268,7 +338,7 @@ class CudaMgr {
   std::vector<CUcontext> device_contexts_;
   mutable std::mutex device_mutex_;
   bool device_properties_initialized_{false};
-
+  std::vector<char> gpu_rt_fatbin_;
 #ifdef HAVE_CUDA
   bool log_memory_activity_;
   DeviceMemoryAllocationMapUqPtr device_memory_allocation_map_;

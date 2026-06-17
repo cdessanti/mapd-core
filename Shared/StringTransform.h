@@ -52,6 +52,8 @@ std::string hide_sensitive_data_from_query(std::string const& query_str);
 
 std::string format_num_bytes(const size_t bytes);
 
+std::string format_microseconds(const size_t microseconds);
+
 #ifndef __CUDACC__
 std::optional<size_t> inside_string_literal(
     const size_t start,

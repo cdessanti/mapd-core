@@ -259,37 +259,37 @@ DEF_UMINUS_NULLABLE(double, double)
 
 #undef DEF_UMINUS_NULLABLE
 
-#define DEF_CAST_NULLABLE(from_type, to_type)                                   \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                               \
-      cast_##from_type##_to_##to_type##_nullable(const from_type operand,       \
-                                                 const from_type from_null_val, \
-                                                 const to_type to_null_val) {   \
-    return operand == from_null_val ? to_null_val : operand;                    \
+#define DEF_CAST_NULLABLE(from_type, to_type)                               \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                           \
+  cast_##from_type##_to_##to_type##_nullable(const from_type operand,       \
+                                             const from_type from_null_val, \
+                                             const to_type to_null_val) {   \
+    return operand == from_null_val ? to_null_val : operand;                \
   }
 
-#define DEF_CAST_SCALED_NULLABLE(from_type, to_type)                                   \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                                      \
-      cast_##from_type##_to_##to_type##_scaled_nullable(const from_type operand,       \
-                                                        const from_type from_null_val, \
-                                                        const to_type to_null_val,     \
-                                                        const to_type divider) {       \
-    return operand == from_null_val ? to_null_val : operand / divider;                 \
+#define DEF_CAST_SCALED_NULLABLE(from_type, to_type)                               \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                                  \
+  cast_##from_type##_to_##to_type##_scaled_nullable(const from_type operand,       \
+                                                    const from_type from_null_val, \
+                                                    const to_type to_null_val,     \
+                                                    const to_type divider) {       \
+    return operand == from_null_val ? to_null_val : operand / divider;             \
   }
 
 #define DEF_CAST_NULLABLE_BIDIR(type1, type2) \
   DEF_CAST_NULLABLE(type1, type2)             \
   DEF_CAST_NULLABLE(type2, type1)
 
-#define DEF_ROUND_NULLABLE(from_type, to_type)                                  \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                               \
-      cast_##from_type##_to_##to_type##_nullable(const from_type operand,       \
-                                                 const from_type from_null_val, \
-                                                 const to_type to_null_val) {   \
-    return operand == from_null_val                                             \
-               ? to_null_val                                                    \
-               : static_cast<to_type>(operand + (operand < from_type(0)         \
-                                                     ? from_type(-0.5)          \
-                                                     : from_type(0.5)));        \
+#define DEF_ROUND_NULLABLE(from_type, to_type)                              \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE to_type                           \
+  cast_##from_type##_to_##to_type##_nullable(const from_type operand,       \
+                                             const from_type from_null_val, \
+                                             const to_type to_null_val) {   \
+    return operand == from_null_val                                         \
+               ? to_null_val                                                \
+               : static_cast<to_type>(operand + (operand < from_type(0)     \
+                                                     ? from_type(-0.5)      \
+                                                     : from_type(0.5)));    \
   }
 
 DEF_CAST_NULLABLE_BIDIR(int8_t, int16_t)
@@ -387,6 +387,24 @@ extern "C" GPU_RT_STUB void agg_count_distinct_bitmap_gpu(int64_t*,
                                                           const int64_t,
                                                           const int64_t,
                                                           const int64_t) {}
+
+extern "C" GPU_RT_STUB void agg_count_distinct_hybrid_paged_bitmap_gpu(const int64_t,
+                                                                       const int32_t,
+                                                                       const int64_t,
+                                                                       const int64_t,
+                                                                       const int32_t,
+                                                                       const int64_t,
+                                                                       const int64_t) {}
+
+extern "C" GPU_RT_STUB void agg_count_distinct_hybrid_paged_bitmap_skip_val_gpu(
+    const int64_t,
+    const int32_t,
+    const int64_t,
+    const int64_t,
+    const int32_t,
+    const int64_t,
+    const int64_t,
+    const int64_t) {}
 
 extern "C" GPU_RT_STUB int32_t agg_mode_func_gpu(int64_t* agg,
                                                  int64_t const val,
@@ -531,16 +549,16 @@ inline int64_t compute_current_row_idx_in_frame(const int64_t num_elems,
 
 #define DEF_COMPUTE_CURRENT_ROW_IDX_IN_FRAME(value_type, oper_name)                    \
   extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t                                      \
-      compute_##value_type##_##oper_name##_current_row_idx_in_frame(                   \
-          const int64_t num_elems,                                                     \
-          const int64_t cur_row_idx,                                                   \
-          const value_type* col_buf,                                                   \
-          const int32_t* partition_rowid_buf,                                          \
-          const int64_t* ordered_index_buf,                                            \
-          const value_type null_val,                                                   \
-          const bool nulls_first,                                                      \
-          const int64_t null_start_pos,                                                \
-          const int64_t null_end_pos) {                                                \
+  compute_##value_type##_##oper_name##_current_row_idx_in_frame(                       \
+      const int64_t num_elems,                                                         \
+      const int64_t cur_row_idx,                                                       \
+      const value_type* col_buf,                                                       \
+      const int32_t* partition_rowid_buf,                                              \
+      const int64_t* ordered_index_buf,                                                \
+      const value_type null_val,                                                       \
+      const bool nulls_first,                                                          \
+      const int64_t null_start_pos,                                                    \
+      const int64_t null_end_pos) {                                                    \
     return compute_current_row_idx_in_frame<value_type>(num_elems,                     \
                                                         cur_row_idx,                   \
                                                         col_buf,                       \
@@ -594,36 +612,36 @@ inline int64_t compute_lower_bound_from_ordered_partition_index(
   return l;
 }
 
-#define DEF_RANGE_MODE_FRAME_LOWER_BOUND(                                                     \
-    target_val_type, col_type, null_type, opname, opsym)                                      \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t                                             \
-      range_mode_##target_val_type##_##col_type##_##null_type##_##opname##_frame_lower_bound( \
-          const int64_t num_elems,                                                            \
-          const target_val_type target_value,                                                 \
-          const col_type* col_buf,                                                            \
-          const int32_t* partition_rowid_buf,                                                 \
-          const int64_t* ordered_index_buf,                                                   \
-          const int64_t frame_bound_val,                                                      \
-          const null_type null_val,                                                           \
-          const bool nulls_first,                                                             \
-          const int64_t null_start_pos,                                                       \
-          const int64_t null_end_pos) {                                                       \
-    if (target_value == null_val) {                                                           \
-      return null_start_pos;                                                                  \
-    }                                                                                         \
-    target_val_type new_val = target_value opsym frame_bound_val;                             \
-    return compute_lower_bound_from_ordered_partition_index<target_val_type,                  \
-                                                            col_type,                         \
-                                                            null_type>(                       \
-        num_elems,                                                                            \
-        new_val,                                                                              \
-        col_buf,                                                                              \
-        partition_rowid_buf,                                                                  \
-        ordered_index_buf,                                                                    \
-        null_val,                                                                             \
-        nulls_first,                                                                          \
-        null_start_pos,                                                                       \
-        null_end_pos);                                                                        \
+#define DEF_RANGE_MODE_FRAME_LOWER_BOUND(                                                 \
+    target_val_type, col_type, null_type, opname, opsym)                                  \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t                                         \
+  range_mode_##target_val_type##_##col_type##_##null_type##_##opname##_frame_lower_bound( \
+      const int64_t num_elems,                                                            \
+      const target_val_type target_value,                                                 \
+      const col_type* col_buf,                                                            \
+      const int32_t* partition_rowid_buf,                                                 \
+      const int64_t* ordered_index_buf,                                                   \
+      const int64_t frame_bound_val,                                                      \
+      const null_type null_val,                                                           \
+      const bool nulls_first,                                                             \
+      const int64_t null_start_pos,                                                       \
+      const int64_t null_end_pos) {                                                       \
+    if (target_value == null_val) {                                                       \
+      return null_start_pos;                                                              \
+    }                                                                                     \
+    target_val_type new_val = target_value opsym frame_bound_val;                         \
+    return compute_lower_bound_from_ordered_partition_index<target_val_type,              \
+                                                            col_type,                     \
+                                                            null_type>(                   \
+        num_elems,                                                                        \
+        new_val,                                                                          \
+        col_buf,                                                                          \
+        partition_rowid_buf,                                                              \
+        ordered_index_buf,                                                                \
+        null_val,                                                                         \
+        nulls_first,                                                                      \
+        null_start_pos,                                                                   \
+        null_end_pos);                                                                    \
   }
 DEF_RANGE_MODE_FRAME_LOWER_BOUND(int8_t, int8_t, int8_t, add, +)
 DEF_RANGE_MODE_FRAME_LOWER_BOUND(int8_t, int8_t, int8_t, sub, -)
@@ -675,36 +693,36 @@ inline int64_t compute_upper_bound_from_ordered_partition_index(
   return l;
 }
 
-#define DEF_RANGE_MODE_FRAME_UPPER_BOUND(                                                     \
-    target_val_type, col_type, null_type, opname, opsym)                                      \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t                                             \
-      range_mode_##target_val_type##_##col_type##_##null_type##_##opname##_frame_upper_bound( \
-          const int64_t num_elems,                                                            \
-          const target_val_type target_value,                                                 \
-          const col_type* col_buf,                                                            \
-          const int32_t* partition_rowid_buf,                                                 \
-          const int64_t* ordered_index_buf,                                                   \
-          const int64_t frame_bound_val,                                                      \
-          const null_type null_val,                                                           \
-          const bool nulls_first,                                                             \
-          const int64_t null_start_pos,                                                       \
-          const int64_t null_end_pos) {                                                       \
-    if (target_value == null_val) {                                                           \
-      return null_end_pos;                                                                    \
-    }                                                                                         \
-    target_val_type new_val = target_value opsym frame_bound_val;                             \
-    return compute_upper_bound_from_ordered_partition_index<target_val_type,                  \
-                                                            col_type,                         \
-                                                            null_type>(                       \
-        num_elems,                                                                            \
-        new_val,                                                                              \
-        col_buf,                                                                              \
-        partition_rowid_buf,                                                                  \
-        ordered_index_buf,                                                                    \
-        null_val,                                                                             \
-        nulls_first,                                                                          \
-        null_start_pos,                                                                       \
-        null_end_pos);                                                                        \
+#define DEF_RANGE_MODE_FRAME_UPPER_BOUND(                                                 \
+    target_val_type, col_type, null_type, opname, opsym)                                  \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE int64_t                                         \
+  range_mode_##target_val_type##_##col_type##_##null_type##_##opname##_frame_upper_bound( \
+      const int64_t num_elems,                                                            \
+      const target_val_type target_value,                                                 \
+      const col_type* col_buf,                                                            \
+      const int32_t* partition_rowid_buf,                                                 \
+      const int64_t* ordered_index_buf,                                                   \
+      const int64_t frame_bound_val,                                                      \
+      const null_type null_val,                                                           \
+      const bool nulls_first,                                                             \
+      const int64_t null_start_pos,                                                       \
+      const int64_t null_end_pos) {                                                       \
+    if (target_value == null_val) {                                                       \
+      return null_end_pos;                                                                \
+    }                                                                                     \
+    target_val_type new_val = target_value opsym frame_bound_val;                         \
+    return compute_upper_bound_from_ordered_partition_index<target_val_type,              \
+                                                            col_type,                     \
+                                                            null_type>(                   \
+        num_elems,                                                                        \
+        new_val,                                                                          \
+        col_buf,                                                                          \
+        partition_rowid_buf,                                                              \
+        ordered_index_buf,                                                                \
+        null_val,                                                                         \
+        nulls_first,                                                                      \
+        null_start_pos,                                                                   \
+        null_end_pos);                                                                    \
   }
 DEF_RANGE_MODE_FRAME_UPPER_BOUND(int8_t, int8_t, int8_t, add, +)
 DEF_RANGE_MODE_FRAME_UPPER_BOUND(int8_t, int8_t, int8_t, sub, -)
@@ -752,15 +770,15 @@ inline LOGICAL_TYPE get_value_in_window_frame(const int64_t target_row_idx_in_fr
 
 #define DEF_GET_VALUE_IN_FRAME(col_type, logical_type)                                \
   extern "C" RUNTIME_EXPORT ALWAYS_INLINE logical_type                                \
-      get_##col_type##_value_##logical_type##_type_in_frame(                          \
-          const int64_t target_row_idx_in_frame,                                      \
-          const int64_t frame_start_offset,                                           \
-          const int64_t frame_end_offset,                                             \
-          const col_type* col_buf,                                                    \
-          const int32_t* partition_rowid_buf,                                         \
-          const int64_t* ordered_index_buf,                                           \
-          const logical_type logical_null_val,                                        \
-          const logical_type col_null_val) {                                          \
+  get_##col_type##_value_##logical_type##_type_in_frame(                              \
+      const int64_t target_row_idx_in_frame,                                          \
+      const int64_t frame_start_offset,                                               \
+      const int64_t frame_end_offset,                                                 \
+      const col_type* col_buf,                                                        \
+      const int32_t* partition_rowid_buf,                                             \
+      const int64_t* ordered_index_buf,                                               \
+      const logical_type logical_null_val,                                            \
+      const logical_type col_null_val) {                                              \
     return get_value_in_window_frame<col_type, logical_type>(target_row_idx_in_frame, \
                                                              frame_start_offset,      \
                                                              frame_end_offset,        \
@@ -931,17 +949,17 @@ inline AGG_TYPE compute_window_func_via_aggregation_tree(
 
 #define DEF_SEARCH_AGGREGATION_TREE(agg_value_type)                                      \
   extern "C" RUNTIME_EXPORT ALWAYS_INLINE agg_value_type                                 \
-      search_##agg_value_type##_aggregation_tree(                                        \
-          agg_value_type* aggregated_tree_for_partition,                                 \
-          size_t query_range_start_idx,                                                  \
-          size_t query_range_end_idx,                                                    \
-          size_t leaf_level,                                                             \
-          size_t tree_fanout,                                                            \
-          bool decimal_type,                                                             \
-          size_t scale,                                                                  \
-          agg_value_type invalid_val,                                                    \
-          agg_value_type null_val,                                                       \
-          int32_t agg_type) {                                                            \
+  search_##agg_value_type##_aggregation_tree(                                            \
+      agg_value_type* aggregated_tree_for_partition,                                     \
+      size_t query_range_start_idx,                                                      \
+      size_t query_range_end_idx,                                                        \
+      size_t leaf_level,                                                                 \
+      size_t tree_fanout,                                                                \
+      bool decimal_type,                                                                 \
+      size_t scale,                                                                      \
+      agg_value_type invalid_val,                                                        \
+      agg_value_type null_val,                                                           \
+      int32_t agg_type) {                                                                \
     if (!aggregated_tree_for_partition || query_range_start_idx > query_range_end_idx) { \
       return null_val;                                                                   \
     }                                                                                    \
@@ -1049,17 +1067,17 @@ inline void compute_derived_aggregates(
 
 #define DEF_SEARCH_DERIVED_AGGREGATION_TREE(agg_value_type)                              \
   extern "C" RUNTIME_EXPORT ALWAYS_INLINE double                                         \
-      search_##agg_value_type##_derived_aggregation_tree(                                \
-          SumAndCountPair<agg_value_type>* aggregated_tree_for_partition,                \
-          size_t query_range_start_idx,                                                  \
-          size_t query_range_end_idx,                                                    \
-          size_t leaf_level,                                                             \
-          size_t tree_fanout,                                                            \
-          bool decimal_type,                                                             \
-          size_t scale,                                                                  \
-          agg_value_type invalid_val,                                                    \
-          agg_value_type null_val,                                                       \
-          int32_t agg_type) {                                                            \
+  search_##agg_value_type##_derived_aggregation_tree(                                    \
+      SumAndCountPair<agg_value_type>* aggregated_tree_for_partition,                    \
+      size_t query_range_start_idx,                                                      \
+      size_t query_range_end_idx,                                                        \
+      size_t leaf_level,                                                                 \
+      size_t tree_fanout,                                                                \
+      bool decimal_type,                                                                 \
+      size_t scale,                                                                      \
+      agg_value_type invalid_val,                                                        \
+      agg_value_type null_val,                                                           \
+      int32_t agg_type) {                                                                \
     if (!aggregated_tree_for_partition || query_range_start_idx > query_range_end_idx) { \
       return null_val;                                                                   \
     }                                                                                    \
@@ -1088,14 +1106,14 @@ DEF_SEARCH_DERIVED_AGGREGATION_TREE(int64_t)
 DEF_SEARCH_DERIVED_AGGREGATION_TREE(double)
 #undef DEF_SEARCH_DERIVED_AGGREGATION_TREE
 
-#define DEF_HANDLE_NULL_FOR_WINDOW_FRAMING_AGG(agg_type, null_type)            \
-  extern "C" RUNTIME_EXPORT ALWAYS_INLINE agg_type                             \
-      handle_null_val_##agg_type##_##null_type##_window_framing_agg(           \
-          agg_type res, null_type agg_null_val, agg_type input_col_null_val) { \
-    if (res == agg_null_val) {                                                 \
-      return input_col_null_val;                                               \
-    }                                                                          \
-    return res;                                                                \
+#define DEF_HANDLE_NULL_FOR_WINDOW_FRAMING_AGG(agg_type, null_type)        \
+  extern "C" RUNTIME_EXPORT ALWAYS_INLINE agg_type                         \
+  handle_null_val_##agg_type##_##null_type##_window_framing_agg(           \
+      agg_type res, null_type agg_null_val, agg_type input_col_null_val) { \
+    if (res == agg_null_val) {                                             \
+      return input_col_null_val;                                           \
+    }                                                                      \
+    return res;                                                            \
   }
 DEF_HANDLE_NULL_FOR_WINDOW_FRAMING_AGG(double, int64_t)
 DEF_HANDLE_NULL_FOR_WINDOW_FRAMING_AGG(double, double)
@@ -1862,7 +1880,7 @@ extern "C" GPU_RT_STUB void sync_threadblock() {}
 
 extern "C" GPU_RT_STUB void write_back_non_grouped_agg(int64_t* input_buffer,
                                                        int64_t* output_buffer,
-                                                       const int32_t num_agg_cols){};
+                                                       const int32_t num_agg_cols) {};
 // x64 stride functions
 
 extern "C" RUNTIME_EXPORT NEVER_INLINE int32_t
@@ -2484,7 +2502,8 @@ extern "C" RUNTIME_EXPORT NEVER_INLINE void query_stub_hoisted_literals(
 #ifndef _WIN32
   assert(error_codes || total_matched || out || out_reduced || frag_idx ||
          row_index_resume || col_buffers || literals || num_rows || frag_row_offsets ||
-         frag_ids || max_matched || init_agg_value || join_hash_tables || row_func_mgr || num_entries || buffer_size);
+         frag_ids || max_matched || init_agg_value || join_hash_tables || row_func_mgr ||
+         num_entries || buffer_size);
 #endif
 }
 

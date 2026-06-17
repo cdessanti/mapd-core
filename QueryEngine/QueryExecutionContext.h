@@ -110,6 +110,7 @@ class QueryExecutionContext : boost::noncopyable {
                                       std::vector<std::vector<const int8_t*>> col_buffers,
                                       const FetchResultFragmentInfo& fragment_info,
                                       const int32_t scan_limit,
+                                      Data_Namespace::DataMgr* data_mgr,
                                       int32_t* error_code,
                                       const uint32_t start_rowid,
                                       const uint32_t num_tables,

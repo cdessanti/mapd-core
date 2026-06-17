@@ -23,8 +23,10 @@
 #ifndef QUERYENGINE_COUNTDISTINCT_H
 #define QUERYENGINE_COUNTDISTINCT_H
 
+#include "Shared/thread_count.h"
 #include "Descriptors/CountDistinctDescriptor.h"
 #include "HyperLogLog.h"
+#include "Shared/thread_count.h"
 
 #include "ThirdParty/robin_hood/robin_hood.h"
 
@@ -62,7 +64,7 @@ inline size_t bitmap_set_size(const int8_t* bitmap,
           if (g_enable_intrinsics_for_bitmap_count) {
             local_set_size += _mm_popcnt_u64(bitmap64[j]);
           } else {
-            std::bitset<64> word_bitset(bitmap64[i]);
+            std::bitset<64> word_bitset(bitmap64[j]);
             set_size += word_bitset.count();
           }
         }
@@ -145,7 +147,9 @@ inline int64_t count_distinct_set_size(
     if (count_distinct_desc.sub_bitmap_count > 1) {
       partial_bitmap_union(set_vals, count_distinct_desc);
     }
-    return bitmap_set_size(set_vals, count_distinct_desc.bitmapSizeBytes());
+    auto is_parallel =
+        count_distinct_desc.bitmapSizeBytes() > 128000 ? cpu_threads() / 4 : 0;
+    return bitmap_set_size(set_vals, count_distinct_desc.bitmapSizeBytes(), is_parallel);
   }
   CHECK(count_distinct_desc.impl_type_ == CountDistinctImplType::UnorderedSet);
   return reinterpret_cast<CountDistinctSet*>(set_handle)->size();

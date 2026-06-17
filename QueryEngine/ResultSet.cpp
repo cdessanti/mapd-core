@@ -713,7 +713,8 @@ void ResultSet::syncEstimatorBuffer() const {
   cuda_allocator_->copyFromDevice(host_estimator_buffer_->getMemoryPtr(),
                                   device_buffer_ptr,
                                   estimator_->getBufferSize(),
-                                  "Estimator buffer");
+                                  "Estimator buffer",
+                                  GpuCompressionAlgo::kNvidiaBitcompNativeSparse);
 }
 
 void ResultSet::setQueueTime(const int64_t queue_time) {
@@ -799,6 +800,7 @@ void ResultSet::sort(const std::list<Analyzer::OrderEntry>& order_entries,
 #ifdef HAVE_CUDA
   if (canUseFastBaselineSort(order_entries, top_n)) {
     baselineSort(order_entries, top_n, device_type, executor);
+    setSorted(true);
     return;
   }
 #endif  // HAVE_CUDA
@@ -812,6 +814,7 @@ void ResultSet::sort(const std::list<Analyzer::OrderEntry>& order_entries,
       LOG(WARNING) << "Out of GPU memory during sort, finish on CPU";
       radixSortOnCpu(order_entries);
     }
+    setSorted(true);
     return;
   }
   // This check isn't strictly required, but allows the index buffer to be 32-bit.
@@ -826,6 +829,7 @@ void ResultSet::sort(const std::list<Analyzer::OrderEntry>& order_entries,
       throw WatchdogException("Sorting the result would be too slow");
     }
     parallelTop(order_entries, top_n, executor);
+    setSorted(true);
   } else {
     if (g_enable_watchdog && entryCount() > g_watchdog_baseline_sort_max) {
       throw WatchdogException("Sorting the result would be too slow");
@@ -844,6 +848,7 @@ void ResultSet::sort(const std::list<Analyzer::OrderEntry>& order_entries,
       permutation_.resize(pv.size());
       permutation_.shrink_to_fit();
     }
+    setSorted(true);
   }
 }
 
